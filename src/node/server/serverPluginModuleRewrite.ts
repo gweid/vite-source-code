@@ -73,9 +73,9 @@ export const moduleRewritePlugin: ServerPlugin = ({
       // 跳过 client.ts 文件
       publicPath !== clientPublicPath &&
       // need to rewrite for <script>\<template> part in vue files
-      // 重写 vue 文件
       !((ctx.path.endsWith('.vue') || ctx.vue) && ctx.query.type === 'style')
     ) {
+      // 读取内容
       const content = await readBody(ctx.body)
       const cacheKey = publicPath + content
       const isHmrRequest = !!ctx.query.t
@@ -83,6 +83,9 @@ export const moduleRewritePlugin: ServerPlugin = ({
         debug(`(cached) ${ctx.url}`)
         ctx.body = rewriteCache.get(cacheKey)
       } else {
+        // <script type="module" src="/main.js"></script>
+        // 如果是没有在 script 标签内部直接写 import，而是用 src 的形式引用
+        // 那么重写 js 文件里的 import
         await initLexer
         // dynamic import may contain extension-less path,
         // (.e.g import(runtimePathString))
@@ -93,25 +96,7 @@ export const moduleRewritePlugin: ServerPlugin = ({
         const importer = removeUnRelatedHmrQuery(
           resolver.normalizePublicPath(ctx.url)
         )
-        // <script type="module" src="/main.js"></script>
-        // 如果是没有在 script 标签内部直接写 import，而是用 src 的形式引用
-        // 那么重写 js 文件里的 import
 
-        /**
-         * vue 文件重写
-          const __script = {  // 抽出 script
-            name: 'App',
-            components: {
-              HelloWorld
-            }
-          }
-          import "/src/App.vue?type=style&index=0" // 将 style 拆分，浏览器继续发起请求获取样式
-          import { render as __render } from "/src/App.vue?type=template" // 将 template 拆分，浏览器继续发起请求获取
-          __script.render = __render // render 方法挂载，用于 createApp 时渲染
-          __script.__hmrId = "/src/App.vue" // 记录热更新
-          __script.__file = "G:\\分享(2020-08-14)\\vite-test\\src\\App.vue" // 记录文件原始路径，热更需要
-          export default __script
-         */
         ctx.body = rewriteImports(
           root,
           content!,
@@ -148,6 +133,7 @@ export function rewriteImports(
   try {
     let imports: ImportSpecifier[] = []
     try {
+      // 通过 es-module-lexer 的 parseImports 解析资源 ast 拿到 import 内容
       imports = parseImports(source)[0]
     } catch (e) {
       console.error(
@@ -280,6 +266,8 @@ export const resolveImport = (
 ): string => {
   id = resolver.alias(id) || id
 
+  // bareImportRE: 是一个正则 /^[^\/\.]/  表示不是以 / 或者 . 开头
+  // 就是类似 import xx from 'dayjs' 这种直接是 node_module 里面的 
   if (bareImportRE.test(id)) {
     // directly resolve bare module names to its entry path so that relative
     // imports from it (including source map urls) can work correctly
@@ -287,12 +275,14 @@ export const resolveImport = (
   } else {
     // 1. relative to absolute
     //    ./foo -> /some/path/foo
+    // 转换为 绝对路径
     let { pathname, query } = resolver.resolveRelativeRequest(importer, id)
 
     // 2. resolve dir index and extensions.
     pathname = resolver.normalizePublicPath(pathname)
 
     // 3. mark non-src imports
+    // 例如 css 之类的转换为 /src/index.css?import 这种形式
     if (!query && path.extname(pathname) && !jsSrcRE.test(pathname)) {
       query += `?import`
     }

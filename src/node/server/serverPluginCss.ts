@@ -39,6 +39,7 @@ export const cssPlugin: ServerPlugin = ({ root, app, watcher, resolver }) => {
     }
   })
 
+  // 监听 css 文件变化
   watcher.on('change', (filePath) => {
     if (isCSSRequest(filePath)) {
       const publicPath = resolver.fileToRequest(filePath)
@@ -172,6 +173,7 @@ export const cssPlugin: ServerPlugin = ({ root, app, watcher, resolver }) => {
   }
 }
 
+// 重写 css 文件
 export function codegenCss(
   id: string,
   css: string,

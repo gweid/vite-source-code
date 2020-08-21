@@ -92,6 +92,7 @@ export const vuePlugin: ServerPlugin = ({
     }
 
     // 没有 query.type, 直接请求（/App.vue）
+    // 会调用 compileSFCMain 将 vue 文件拆分成三块
     if (!query.type) {
       // watch potentially out of root vue file since we do a custom read here
       watchFileIfOutOfRoot(watcher, root, filePath)
@@ -105,6 +106,7 @@ export const vuePlugin: ServerPlugin = ({
         )
       }
       ctx.type = 'js'
+      // compileSFCMain：将 vue 文件拆分成三块
       const { code, map } = await compileSFCMain(
         descriptor,
         filePath,
@@ -423,6 +425,22 @@ async function parseSFC(
   return descriptor
 }
 
+/**
+ * vue 文件重写
+ * 
+   const __script = {  // 抽出 script
+     name: 'App',
+     components: {
+       HelloWorld
+     }
+   }
+   import "/src/App.vue?type=style&index=0" // 将 style 拆分，浏览器继续发起请求获取样式
+   import { render as __render } from "/src/App.vue?type=template" // 将 template 拆分，浏览器继续发起请求获取
+   __script.render = __render // render 方法挂载，用于 createApp 时渲染
+   __script.__hmrId = "/src/App.vue" // 记录热更新
+   __script.__file = "G:\\Share\\vite-test\\src\\components\\HelloWorld.vue" // 记录文件原始路径，热更需要
+   export default __script
+*/
 async function compileSFCMain(
   descriptor: SFCDescriptor,
   filePath: string,

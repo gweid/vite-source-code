@@ -9,6 +9,7 @@ const debug = require('debug')('vite:history')
 
 export const seenUrls = new Set()
 
+// 
 export const serveStaticPlugin: ServerPlugin = ({
   root,
   app,

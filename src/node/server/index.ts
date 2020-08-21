@@ -61,7 +61,15 @@ export function createServer(config: ServerConfig): Server {
 
   const app = new Koa<State, Context>()
   const server = resolveServer(config, app.callback())
-  // chokidar.watch chokidar 包的作用就是监听文件变化
+
+  // chokidar.watch   chokidar 包的作用就是监听文件变化
+  // chokidar.watch(paths, [options]) 返回一个 chokidar 构造监听实例
+  // chokidar 构造监听实例的 on 事件
+  //   - add 新增文件时触发
+  //   - addDir 新增文件夹的时候触发
+  //   - unlink 对应的文件的删除
+  //   - unlinkDir 对应的文件夹的删除
+  //   - change 文件内容改变时触发
   const watcher = chokidar.watch(root, {
     ignored: [/\bnode_modules\b/, /\b\.git\b/]
   }) as HMRWatcher
@@ -90,15 +98,15 @@ export function createServer(config: ServerConfig): Server {
     // rewrite and source map plugins take highest priority and should be run
     // after all other middlewares have finished
     sourceMapPlugin,
-    moduleRewritePlugin,
-    htmlRewritePlugin,
+    moduleRewritePlugin, // 对 js 文件 或者 src='xx.js' 这种方式引入的 js 文件重写
+    htmlRewritePlugin, // 重写 index.html, 主要是插入 client.js
     // user plugins
     ...(Array.isArray(configureServer) ? configureServer : [configureServer]),
     envPlugin,
-    moduleResolvePlugin,
+    moduleResolvePlugin, // 解析文件路径
     proxyPlugin,
-    clientPlugin,
-    hmrPlugin,
+    clientPlugin, // 拦截 client.js 返回给客户端，然客户端开启 socket
+    hmrPlugin, // 启动服务端的 socket
     ...(transforms.length || Object.keys(vueCustomBlockTransforms).length
       ? [
           createServerTransformPlugin(
@@ -108,8 +116,8 @@ export function createServer(config: ServerConfig): Server {
           )
         ]
       : []),
-    vuePlugin,
-    cssPlugin,
+    vuePlugin, // 重写 vue 文件，拆分为三大块
+    cssPlugin, // 处理 css 文件
     enableEsbuild ? esbuildPlugin : null,
     jsonPlugin,
     assetPathPlugin,
@@ -117,9 +125,11 @@ export function createServer(config: ServerConfig): Server {
     wasmPlugin,
     serveStaticPlugin
   ]
+  // 拿出来逐个执行
   resolvedPlugins.forEach((m) => m && m(context))
 
   const listen = server.listen.bind(server)
+  // 监听端口
   server.listen = (async (port: number, ...args: any[]) => {
     if (optimizeDeps.auto !== false) {
       await require('../optimizer').optimizeDeps(config)

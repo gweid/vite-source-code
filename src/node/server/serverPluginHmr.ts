@@ -100,6 +100,7 @@ export const hmrPlugin: ServerPlugin = ({
     }
   })
 
+  // 将 socket 的 send 方法赋值给 watcher.send
   const send = (watcher.send = (payload: HMRPayload) => {
     const stringified = JSON.stringify(payload, null, 2)
     debugHmr(`update: ${stringified}`)
