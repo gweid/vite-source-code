@@ -11,6 +11,7 @@ import { VERSION } from './constants'
 import { bindShortcuts } from './shortcuts'
 import { resolveConfig } from '.'
 
+// 创建一个 cli 命令行工具
 const cli = cac('vite')
 
 // global options
@@ -70,6 +71,11 @@ const filterDuplicateOptions = <T extends object>(options: T) => {
 /**
  * removing global flags before passing as command specific sub-configs
  */
+// 规范化并清理用户传入的配置对象​​，确保后续处理的配置数据格式统一且安全：
+//  - 移除无效/空值属性​​：过滤掉 undefined、null 或空字符串的配置项，避免干扰后续逻辑
+// ​ - ​类型转换​​：将某些配置项强制转换为正确的类型（如布尔值、数字）
+//  - ​​默认值填充​​：对未显式配置的选项注入默认值
+// ​ - ​安全校验​​：防止用户传入非法值（如恶意路径或非预期类型）
 function cleanOptions<Options extends GlobalCLIOptions>(
   options: Options,
 ): Omit<Options, keyof GlobalCLIOptions> {
@@ -154,6 +160,7 @@ cli
     // is ok here
     const { createServer } = await import('./server')
     try {
+      // 通过 createServer 创建一个 server 对象
       const server = await createServer({
         root,
         base: options.base,
@@ -162,6 +169,7 @@ cli
         logLevel: options.logLevel,
         clearScreen: options.clearScreen,
         optimizeDeps: { force: options.force },
+        // 执行 createServer 之前，先执行了 cleanOptions 函数，规范化用户的命令输入
         server: cleanOptions(options),
       })
 
@@ -169,6 +177,7 @@ cli
         throw new Error('HTTP server not available')
       }
 
+      // 启动 http server 服务器
       await server.listen()
 
       const info = server.config.logger.info

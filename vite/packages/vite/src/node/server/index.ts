@@ -344,10 +344,17 @@ export async function _createServer(
   inlineConfig: InlineConfig = {},
   options: { ws: boolean },
 ): Promise<ViteDevServer> {
+  // ​​解析和标准化用户配置​​，将命令行参数、配置文件（vite.config.js）和默认配置合并为统一的 ​​ResolvedConfig 对象
   const config = await resolveConfig(inlineConfig, 'serve')
 
   const { root, server: serverConfig } = config
+
+  // resolveHttpsConfig 处理是否开启 https
+  // 如果开启了 https，会加载证书（支持自定义或自动生成）
   const httpsOptions = await resolveHttpsConfig(config.server.https)
+
+  // middlewareMode：以中间件模式创建 Vite 服务器
+  // 主要用于与后端服务集成、ssr 等
   const { middlewareMode } = serverConfig
 
   const resolvedWatchOptions = resolveChokidarOptions(config, {
@@ -355,31 +362,49 @@ export async function _createServer(
     ...serverConfig.watch,
   })
 
+  // connect 是一个中间件框架，Express 的中间件就是基于 connect 的
+  // const app = connect();
+  // app.use((req, res, next) => {
+  //   console.log(`${req.method} ${req.url}`);
+  //   next();
+  // })
   const middlewares = connect() as Connect.Server
+
+  // resolveHttpServer 用于 ​​创建和配置 HTTP/HTTPS 服务器实例​​ 的核心函数
+  // 根据用户配置（server.https 和 server.proxy 等）生成一个可用的 Node.js HTTP 或 HTTPS、HTTP2 服务器
   const httpServer = middlewareMode
     ? null
     : await resolveHttpServer(serverConfig, middlewares, httpsOptions)
+
+  // 创建一个 websocket 服务器（与 HMR 模块热更新相关）
   const ws = createWebSocketServer(httpServer, config, httpsOptions)
 
   if (httpServer) {
     setClientErrorHandler(httpServer, config.logger)
   }
 
+  // chokidar 是一个文件监听库，用于监听文件变化
   const watcher = chokidar.watch(
     // config file dependencies and env file might be outside of root
     [root, ...config.configFileDependencies, config.envDir],
     resolvedWatchOptions,
   ) as FSWatcher
 
+  // 创建模块依赖图，记录模块之间的关系
   const moduleGraph: ModuleGraph = new ModuleGraph((url, ssr) =>
     container.resolveId(url, undefined, { ssr }),
   )
 
+  // 创建 pluginContainer
+  // 开发环境中，Vite 模拟了 Rollup 的插件机制，设计了一个 PluginContainer 对象来调度各个插件
   const container = await createPluginContainer(config, moduleGraph, watcher)
+
+  // 创建一个关闭 http 服务器的函数
   const closeHttpServer = createServerCloseFn(httpServer)
 
   let exitProcess: () => void
 
+  // 创建一个 server 对象
   const server: ViteDevServer = {
     config,
     middlewares,
@@ -427,6 +452,7 @@ export async function _createServer(
         updateModules(module.file, [module], Date.now(), server)
       }
     },
+    // 启动 http 服务
     async listen(port?: number, isRestart?: boolean) {
       await startServer(server, port)
       if (httpServer) {
@@ -439,6 +465,7 @@ export async function _createServer(
       }
       return server
     },
+    // 自动打开浏览器
     openBrowser() {
       const options = server.config.server
       const url =
@@ -531,6 +558,7 @@ export async function _createServer(
     _shortcutsOptions: undefined,
   }
 
+  // 插件如果使用了 transformIndexHtml 这个钩子，会在这里触发
   server.transformIndexHtml = createDevHtmlTransformFn(server)
 
   if (!middlewareMode) {
@@ -547,6 +575,7 @@ export async function _createServer(
     }
   }
 
+  // 触发 HMR 更新
   const onHMRUpdate = async (file: string, configOnly: boolean) => {
     if (serverConfig.hmr !== false) {
       try {
@@ -566,17 +595,22 @@ export async function _createServer(
     await onHMRUpdate(file, true)
   }
 
+  // 监听文件变化
   watcher.on('change', async (file) => {
     file = normalizePath(file)
     // invalidate module graph cache on file change
     moduleGraph.onFileChange(file)
 
+    // 触发 HMR 更新
     await onHMRUpdate(file, false)
   })
 
+  // 监听文件添加
   watcher.on('add', onFileAddUnlink)
+  // 监听文件删除
   watcher.on('unlink', onFileAddUnlink)
 
+  // 通过 vite:invalidate 事件通知浏览器，哪些模块需要失效
   ws.on('vite:invalidate', async ({ path, message }: InvalidatePayload) => {
     const mod = moduleGraph.urlToModuleMap.get(path)
     if (mod && mod.isSelfAccepting && mod.lastHMRTimestamp > 0) {
@@ -605,12 +639,25 @@ export async function _createServer(
   }
 
   // apply server configuration hooks from plugins
+  /**
+   * config.getSortedPluginHooks('configureServer')： 获取所有插件中注册的 configureServer 钩子函数，​​按插件顺序排序​​（遵循 Vite 的插件顺序规则，如 pre/normal/post 阶段）
+   * 
+   * hook(server)： 执行插件中的 configureServer 钩子函数
+   * 
+   * postHooks.push：收集钩子函数可能返回的 ​​清理回调函数​​（() => void）。如果钩子未返回内容（void），则忽略
+   *  - 每个 configureServer 钩子可以返回一个函数（也可以不返回）
+   *  - 返回的函数会被收集到 postHooks 数组中
+   *  - 这些函数会在服务器中间件安装完成后执行
+   */
   const postHooks: ((() => void) | void)[] = []
   for (const hook of config.getSortedPluginHooks('configureServer')) {
     postHooks.push(await hook(server))
   }
 
   // Internal middlewares ------------------------------------------------------
+  // 这后面就是使用中间件，处理请求
+  // vite 从 <script type="module" src="/src/main.tsx"></script> 这个入口开始解析
+  // 每当有一个 import，就有一个请求，下面的中间件就是处理这些请求的
 
   // request timer
   if (process.env.DEBUG) {
@@ -620,7 +667,7 @@ export async function _createServer(
   // disallows request that contains `#` in the URL
   middlewares.use(rejectInvalidRequestMiddleware())
 
-  // cors
+  // 处理 cors
   const { cors } = serverConfig
   if (cors !== false) {
     middlewares.use(
@@ -666,6 +713,7 @@ export async function _createServer(
   // serve static files under /public
   // this applies before the transform middleware so that these files are served
   // as-is without transforms.
+  // 处理 public 目录下的静态文件
   if (config.publicDir) {
     middlewares.use(
       servePublicMiddleware(config.publicDir, server, config.server.headers),
@@ -673,6 +721,7 @@ export async function _createServer(
   }
 
   // main transform middleware
+  // 对模块进行编译
   middlewares.use(transformMiddleware(server))
 
   // serve static files
@@ -687,14 +736,17 @@ export async function _createServer(
   // run post config hooks
   // This is applied before the html middleware so that user middleware can
   // serve custom content instead of index.html.
+  // 执行上面收集到的 configureServer 钩子函数返回的回调函数
   postHooks.forEach((fn) => fn && fn())
 
+  // spa 或 mpa 应用
   if (config.appType === 'spa' || config.appType === 'mpa') {
     // transform index.html
     middlewares.use(indexHtmlMiddleware(server))
 
     // handle 404s
     // Keep the named function. The name is visible in debug logs via `DEBUG=connect:dispatcher ...`
+    // 处理路由刷新 404 问题
     middlewares.use(function vite404Middleware(_, res) {
       res.statusCode = 404
       res.end()
@@ -707,16 +759,21 @@ export async function _createServer(
   // httpServer.listen can be called multiple times
   // when port when using next port number
   // this code is to avoid calling buildStart multiple times
+  // 通过 serverInited 和 initingServer 两个标志位，避免并发调用导致的重复初始化
   let initingServer: Promise<void> | undefined
   let serverInited = false
   const initServer = async () => {
+    // 如果服务器已经初始化，则返回
     if (serverInited) return
+    // 如果服务器正在初始化，则返回正在初始化的 Promise
     if (initingServer) return initingServer
 
     initingServer = (async function () {
+      // 执行插件的 buildStart 钩子
       await container.buildStart({})
       // start deps optimizer after all container plugins are ready
       if (isDepsOptimizerEnabled(config, false)) {
+        // 依赖预构建：如果启用了依赖预构建，调用 initDepsOptimizer 预编译 node_modules 中的依赖
         await initDepsOptimizer(config, server)
       }
       initingServer = undefined
@@ -728,9 +785,11 @@ export async function _createServer(
   if (!middlewareMode && httpServer) {
     // overwrite listen to init optimizer before server start
     const listen = httpServer.listen.bind(httpServer)
+    // 当浏览器访问开发服务器时，Vite 在响应请求前会调用 httpServer.listen 方法
     httpServer.listen = (async (port: number, ...args: any[]) => {
       try {
         // ensure ws server started
+        // 开启 websocket 服务
         ws.listen()
         await initServer()
       } catch (e) {
@@ -746,9 +805,11 @@ export async function _createServer(
     await initServer()
   }
 
+  // 将创建的 server 对象返回
   return server
 }
 
+// 启动 http server 服务器
 async function startServer(
   server: ViteDevServer,
   inlinePort?: number,

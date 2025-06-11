@@ -119,16 +119,20 @@ export async function resolveHttpServer(
   app: Connect.Server,
   httpsOptions?: HttpsServerOptions,
 ): Promise<HttpServer> {
+  // 没有开启 https，那么使用 http 创建一个服务器
   if (!httpsOptions) {
     const { createServer } = await import('node:http')
     return createServer(app)
   }
 
+  // 开启了 https
   // #484 fallback to http1 when proxy is needed.
   if (proxy) {
+    // 开启了 https，同时开启了 proxy，回退使用 https 创建一个服务器
     const { createServer } = await import('node:https')
     return createServer(httpsOptions, app)
   } else {
+    // 开启了 https，没有开启 proxy，使用 http2 创建一个服务器
     const { createSecureServer } = await import('node:http2')
     return createSecureServer(
       {
@@ -144,10 +148,26 @@ export async function resolveHttpServer(
   }
 }
 
+/**
+ * 解析和生成 HTTPS 开发服务器配置​​ 的核心函数
+ * 主要作用是为本地开发服务器（vite dev）启用 HTTPS 支持，包括证书加载、协议配置等
+ * 
+ * 使用：
+ * export default {
+ *   server: {
+ *     https: {
+ *       cert: 'path/to/cert.pem',
+ *       key: 'path/to/key.pem'
+ *     }
+ *   }
+ * }
+ */
 export async function resolveHttpsConfig(
   https: boolean | HttpsServerOptions | undefined,
 ): Promise<HttpsServerOptions | undefined> {
+  // 如果 https 为 false，没有开启 https，则返回 undefined
   if (!https) return undefined
+
   if (!isObject(https)) return {}
 
   const [ca, cert, key, pfx] = await Promise.all([
@@ -166,6 +186,7 @@ async function readFileIfExists(value?: string | Buffer | any[]) {
   return value
 }
 
+// 启动 http 服务
 export async function httpServerStart(
   httpServer: HttpServer,
   serverOptions: {

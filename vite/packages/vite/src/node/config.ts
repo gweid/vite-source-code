@@ -429,6 +429,7 @@ export type ResolveFn = (
   ssr?: boolean,
 ) => Promise<string | undefined>
 
+// 解释配置 vite.config.js 文件，生成一个 config 对象
 export async function resolveConfig(
   inlineConfig: InlineConfig,
   command: 'build' | 'serve',

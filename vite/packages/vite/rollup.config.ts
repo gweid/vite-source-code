@@ -16,6 +16,7 @@ const pkg = JSON.parse(
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
+// 打包一个 env 包
 const envConfig = defineConfig({
   input: path.resolve(__dirname, 'src/client/env.ts'),
   plugins: [
@@ -35,6 +36,7 @@ const envConfig = defineConfig({
   },
 })
 
+// 打包一个 client 
 const clientConfig = defineConfig({
   input: path.resolve(__dirname, 'src/client/client.ts'),
   external: ['./env', '@vite/env'],

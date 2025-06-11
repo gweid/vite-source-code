@@ -1,3 +1,4 @@
+// api-extractor 的作用： 将多个 .d.ts 合并为单个文件，移除未导出的类型
 import { Extractor, ExtractorConfig } from '@microsoft/api-extractor'
 
 const result = Extractor.invoke(
