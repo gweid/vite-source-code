@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { performance } from 'node:perf_hooks'
 import { createRequire } from 'node:module'
+import crypto from 'node:crypto'
 import colors from 'picocolors'
 import type { Alias, AliasOptions } from 'dep-types/alias'
 import aliasPlugin from '@rollup/plugin-alias'
@@ -70,6 +71,7 @@ import { findNearestPackageData } from './packages'
 import { loadEnv, resolveEnvPrefix } from './env'
 import type { ResolvedSSROptions, SSROptions } from './ssr'
 import { resolveSSROptions } from './ssr'
+import { getAdditionalAllowedHosts } from './server/middlewares/hostCheck'
 
 const debug = createDebugger('vite:config')
 const promisifiedRealpath = promisify(fs.realpath)
@@ -330,6 +332,18 @@ export interface LegacyOptions {
    * @default false
    */
   buildSsrCjsExternalHeuristics?: boolean
+  /**
+   * In Vite 6.0.8 / 5.4.11 / 4.5.5 and below, WebSocket server was able to connect from any web pages. However,
+   * that could be exploited by a malicious web page.
+   *
+   * In Vite 6.0.9+ / 5.4.12+ / 4.5.6+ the WebSocket server now requires a token to connect from a web page.
+   * But this may break some plugins and frameworks that connects to the WebSocket server
+   * on their own. Enabling this option will make Vite skip the token check.
+   *
+   * **We do not recommend enabling this option unless you are sure that you are fine with
+   * that security weakness.**
+   */
+  skipWebSocketTokenCheck?: boolean
 }
 
 export interface ResolveWorkerOptions extends PluginHookUtils {
@@ -385,6 +399,19 @@ export type ResolvedConfig = Readonly<
     worker: ResolveWorkerOptions
     appType: AppType
     experimental: ExperimentalOptions
+    /**
+     * The token to connect to the WebSocket server from browsers.
+     *
+     * We recommend using `import.meta.hot` rather than connecting
+     * to the WebSocket server directly.
+     * If you have a usecase that requires connecting to the WebSocket
+     * server, please create an issue so that we can discuss.
+     *
+     * @deprecated use `import.meta.hot`
+     */
+    webSocketToken: string
+    /** @internal */
+    additionalAllowedHosts: string[]
   } & PluginHookUtils
 >
 
@@ -649,6 +676,8 @@ export async function resolveConfig(
     config.legacy?.buildSsrCjsExternalHeuristics,
   )
 
+  const preview = resolvePreviewOptions(config.preview, server)
+
   const middlewareMode = config?.server?.middlewareMode
 
   const optimizeDeps = config.optimizeDeps || {}
@@ -704,7 +733,7 @@ export async function resolveConfig(
           },
     server,
     build: resolvedBuildOptions,
-    preview: resolvePreviewOptions(config.preview, server),
+    preview,
     envDir,
     env: {
       ...userEnv,
@@ -734,6 +763,13 @@ export async function resolveConfig(
       hmrPartialAccept: false,
       ...config.experimental,
     },
+    // random 72 bits (12 base64 chars)
+    // at least 64bits is recommended
+    // https://owasp.org/www-community/vulnerabilities/Insufficient_Session-ID_Length
+    webSocketToken: Buffer.from(
+      crypto.randomFillSync(new Uint8Array(9)),
+    ).toString('base64url'),
+    additionalAllowedHosts: getAdditionalAllowedHosts(server, preview),
     getSortedPlugins: undefined!,
     getSortedPluginHooks: undefined!,
   }

@@ -1,6 +1,96 @@
-## <small>4.4.12 (2023-12-04)</small>
+## <small>4.5.14 (2025-04-30)</small>
 
-* fix: backport #15223, proxy html path should be encoded (#15226) (#15227) ([fe8b209](https://github.com/vitejs/vite/commit/fe8b209)), closes [#15223](https://github.com/vitejs/vite/issues/15223) [#15226](https://github.com/vitejs/vite/issues/15226) [#15227](https://github.com/vitejs/vite/issues/15227)
+* fix: backport #19965, check static serve file inside sirv (#19967) ([7739479](https://github.com/vitejs/vite/commit/7739479)), closes [#19965](https://github.com/vitejs/vite/issues/19965) [#19967](https://github.com/vitejs/vite/issues/19967)
+* chore: run format ([99afb60](https://github.com/vitejs/vite/commit/99afb60))
+
+
+
+## <small>4.5.13 (2025-04-10)</small>
+
+* fix: backport #19830, reject requests with `#` in request-target (#19832) ([41f3819](https://github.com/vitejs/vite/commit/41f3819)), closes [#19830](https://github.com/vitejs/vite/issues/19830) [#19832](https://github.com/vitejs/vite/issues/19832)
+
+
+
+## <small>4.5.12 (2025-04-03)</small>
+
+* fix: backport #19782, fs check with svg and relative paths (#19785) ([0a3dcf5](https://github.com/vitejs/vite/commit/0a3dcf5)), closes [#19782](https://github.com/vitejs/vite/issues/19782) [#19785](https://github.com/vitejs/vite/issues/19785)
+
+
+
+## <small>4.5.11 (2025-03-31)</small>
+
+* fix: backport #19761, fs check in transform middleware (#19763) ([26e1764](https://github.com/vitejs/vite/commit/26e1764)), closes [#19761](https://github.com/vitejs/vite/issues/19761) [#19763](https://github.com/vitejs/vite/issues/19763)
+
+
+
+## <small>4.5.10 (2025-03-24)</small>
+
+* fix: backport #19702, fs raw query with query separators (#19704) ([315695e](https://github.com/vitejs/vite/commit/315695e)), closes [#19702](https://github.com/vitejs/vite/issues/19702) [#19704](https://github.com/vitejs/vite/issues/19704)
+
+
+
+## <small>4.5.9 (2025-01-21)</small>
+
+* fix: `preview.allowedHosts` with specific values was not respected (#19246) ([0bc52e0](https://github.com/vitejs/vite/commit/0bc52e0)), closes [#19246](https://github.com/vitejs/vite/issues/19246)
+* fix: allow CORS from loopback addresses by default (#19249) ([8f63cd6](https://github.com/vitejs/vite/commit/8f63cd6)), closes [#19249](https://github.com/vitejs/vite/issues/19249)
+
+
+
+## <small>4.5.8 (2025-01-20)</small>
+
+* fix: try parse `server.origin` URL (#19241) ([3680bad](https://github.com/vitejs/vite/commit/3680bad)), closes [#19241](https://github.com/vitejs/vite/issues/19241)
+
+
+
+## <small>4.5.7 (2025-01-20)</small>
+
+* fix: `crypto.getRandomValues` is not available in old Node versions (#19237) ([f4d3c46](https://github.com/vitejs/vite/commit/f4d3c46)), closes [#19237](https://github.com/vitejs/vite/issues/19237)
+
+
+
+## <small>4.5.6 (2025-01-20)</small>
+
+* fix!: check host header to prevent DNS rebinding attacks and introduce `server.allowedHosts` ([ef1049d](https://github.com/vitejs/vite/commit/ef1049d))
+* fix!: default `server.cors: false` to disallow fetching from untrusted origins ([07b36d5](https://github.com/vitejs/vite/commit/07b36d5))
+* fix: verify token for HMR WebSocket connection ([c065a77](https://github.com/vitejs/vite/commit/c065a77))
+
+
+
+## <small>4.5.5 (2024-09-16)</small>
+
+
+
+
+## <small>4.5.4 (2024-09-16)</small>
+
+* fix: avoid DOM Clobbering gadget in `getRelativeUrlFromDocument` (#18115) ([e812716](https://github.com/vitejs/vite/commit/e812716)), closes [#18115](https://github.com/vitejs/vite/issues/18115)
+* fix: backport #18112, fs raw query ([b901438](https://github.com/vitejs/vite/commit/b901438)), closes [#18112](https://github.com/vitejs/vite/issues/18112)
+
+
+
+## <small>4.5.3 (2024-03-24)</small>
+
+* fix: `fs.deny` with globs with directories (#16250) ([96a7f3a](https://github.com/vitejs/vite/commit/96a7f3a)), closes [#16250](https://github.com/vitejs/vite/issues/16250)
+
+
+
+## <small>4.5.2 (2024-01-19)</small>
+
+* fix: fs deny for case insensitive systems (#15653) ([eeec23b](https://github.com/vitejs/vite/commit/eeec23b)), closes [#15653](https://github.com/vitejs/vite/issues/15653)
+
+
+
+## <small>4.5.1 (2023-12-04)</small>
+
+* fix: backport #15223, proxy html path should be encoded (#15226) ([41bb354](https://github.com/vitejs/vite/commit/41bb354)), closes [#15223](https://github.com/vitejs/vite/issues/15223) [#15226](https://github.com/vitejs/vite/issues/15226)
+
+
+
+## 4.5.0 (2023-10-18)
+
+* feat: backport mdx as known js source (#14560) (#14670) ([45595ef](https://github.com/vitejs/vite/commit/45595ef)), closes [#14560](https://github.com/vitejs/vite/issues/14560) [#14670](https://github.com/vitejs/vite/issues/14670)
+* feat: scan .marko files (#14669) ([ed7bdc5](https://github.com/vitejs/vite/commit/ed7bdc5)), closes [#14669](https://github.com/vitejs/vite/issues/14669)
+* feat(ssr): backport ssr.resolve.conditions and ssr.resolve.externalConditions (#14498) (#14668) ([520139c](https://github.com/vitejs/vite/commit/520139c)), closes [#14498](https://github.com/vitejs/vite/issues/14498) [#14668](https://github.com/vitejs/vite/issues/14668)
 
 
 

@@ -6,6 +6,7 @@ import connect from 'connect'
 import type { Connect } from 'dep-types/connect'
 import corsMiddleware from 'cors'
 import type { ResolvedServerOptions, ResolvedServerUrls } from './server'
+import { DEFAULT_PREVIEW_PORT, defaultAllowedOrigins } from './constants'
 import type { CommonServerOptions } from './http'
 import {
   httpServerStart,
@@ -18,9 +19,9 @@ import compression from './server/middlewares/compression'
 import { proxyMiddleware } from './server/middlewares/proxy'
 import { resolveHostname, resolveServerUrls, shouldServeFile } from './utils'
 import { printServerUrls } from './logger'
-import { DEFAULT_PREVIEW_PORT } from './constants'
-import { resolveConfig } from '.'
-import type { InlineConfig, ResolvedConfig } from '.'
+import { resolveConfig } from './config'
+import type { InlineConfig, ResolvedConfig } from './config'
+import { hostCheckMiddleware } from './server/middlewares/hostCheck'
 
 export interface PreviewOptions extends CommonServerOptions {}
 
@@ -37,6 +38,7 @@ export function resolvePreviewOptions(
     port: preview?.port,
     strictPort: preview?.strictPort ?? server.strictPort,
     host: preview?.host ?? server.host,
+    allowedHosts: preview?.allowedHosts ?? server.allowedHosts,
     https: preview?.https ?? server.https,
     open: preview?.open ?? server.open,
     proxy: preview?.proxy ?? server.proxy,
@@ -145,7 +147,20 @@ export async function preview(
   // cors
   const { cors } = config.preview
   if (cors !== false) {
-    app.use(corsMiddleware(typeof cors === 'boolean' ? {} : cors))
+    app.use(
+      corsMiddleware(
+        typeof cors === 'boolean'
+          ? {}
+          : cors ?? { origin: defaultAllowedOrigins },
+      ),
+    )
+  }
+
+  // host check (to prevent DNS rebinding attacks)
+  const { allowedHosts } = config.preview
+  // no need to check for HTTPS as HTTPS is not vulnerable to DNS rebinding attacks
+  if (allowedHosts !== true && !config.preview.https) {
+    app.use(hostCheckMiddleware(config, true))
   }
 
   // proxy

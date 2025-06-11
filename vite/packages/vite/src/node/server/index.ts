@@ -42,7 +42,11 @@ import {
 } from '../optimizer'
 import { bindShortcuts } from '../shortcuts'
 import type { BindShortcutsOptions } from '../shortcuts'
-import { CLIENT_DIR, DEFAULT_DEV_PORT } from '../constants'
+import {
+  CLIENT_DIR,
+  DEFAULT_DEV_PORT,
+  defaultAllowedOrigins,
+} from '../constants'
 import type { Logger } from '../logger'
 import { printServerUrls } from '../logger'
 import { resolveChokidarOptions } from '../watch'
@@ -78,6 +82,8 @@ import { openBrowser as _openBrowser } from './openBrowser'
 import type { TransformOptions, TransformResult } from './transformRequest'
 import { transformRequest } from './transformRequest'
 import { searchForWorkspaceRoot } from './searchRoot'
+import { hostCheckMiddleware } from './middlewares/hostCheck'
+import { rejectInvalidRequestMiddleware } from './middlewares/rejectInvalidRequest'
 
 export interface ServerOptions extends CommonServerOptions {
   /**
@@ -509,7 +515,19 @@ export async function _createServer(
     _importGlobMap: new Map(),
     _forceOptimizeOnRestart: false,
     _pendingRequests: new Map(),
-    _fsDenyGlob: picomatch(config.server.fs.deny, { matchBase: true }),
+    _fsDenyGlob: picomatch(
+      // matchBase: true does not work as it's documented
+      // https://github.com/micromatch/picomatch/issues/89
+      // convert patterns without `/` on our side for now
+      config.server.fs.deny.map((pattern) =>
+        pattern.includes('/') ? pattern : `**/${pattern}`,
+      ),
+      {
+        matchBase: false,
+        nocase: true,
+        dot: true,
+      },
+    ),
     _shortcutsOptions: undefined,
   }
 
@@ -599,10 +617,26 @@ export async function _createServer(
     middlewares.use(timeMiddleware(root))
   }
 
-  // cors (enabled by default)
+  // disallows request that contains `#` in the URL
+  middlewares.use(rejectInvalidRequestMiddleware())
+
+  // cors
   const { cors } = serverConfig
   if (cors !== false) {
-    middlewares.use(corsMiddleware(typeof cors === 'boolean' ? {} : cors))
+    middlewares.use(
+      corsMiddleware(
+        typeof cors === 'boolean'
+          ? {}
+          : cors ?? { origin: defaultAllowedOrigins },
+      ),
+    )
+  }
+
+  // host check (to prevent DNS rebinding attacks)
+  const { allowedHosts } = serverConfig
+  // no need to check for HTTPS as HTTPS is not vulnerable to DNS rebinding attacks
+  if (allowedHosts !== true && !serverConfig.https) {
+    middlewares.use(hostCheckMiddleware(config, false))
   }
 
   // proxy
@@ -634,7 +668,7 @@ export async function _createServer(
   // as-is without transforms.
   if (config.publicDir) {
     middlewares.use(
-      servePublicMiddleware(config.publicDir, config.server.headers),
+      servePublicMiddleware(config.publicDir, server, config.server.headers),
     )
   }
 

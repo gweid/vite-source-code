@@ -668,7 +668,11 @@ importers:
         specifier: ^3.3.4
         version: 3.3.4
 
-  playground/fs-serve: {}
+  playground/fs-serve:
+    devDependencies:
+      ws:
+        specifier: ^8.18.0
+        version: 8.18.0
 
   playground/glob-import:
     dependencies:
@@ -1185,6 +1189,23 @@ importers:
         specifier: ^4.18.2
         version: 4.18.2
 
+  playground/ssr-conditions:
+    dependencies:
+      '@vitejs/test-ssr-conditions-external':
+        specifier: file:./external
+        version: file:playground/ssr-conditions/external
+      '@vitejs/test-ssr-conditions-no-external':
+        specifier: file:./no-external
+        version: file:playground/ssr-conditions/no-external
+    devDependencies:
+      express:
+        specifier: ^4.18.2
+        version: 4.18.2
+
+  playground/ssr-conditions/external: {}
+
+  playground/ssr-conditions/no-external: {}
+
   playground/ssr-deps:
     dependencies:
       '@vitejs/test-css-lib':
@@ -1386,6 +1407,12 @@ importers:
 
   playground/ssr-webworker:
     dependencies:
+      '@vitejs/test-browser-exports':
+        specifier: file:./browser-exports
+        version: file:playground/ssr-webworker/browser-exports
+      '@vitejs/test-worker-exports':
+        specifier: file:./worker-exports
+        version: file:playground/ssr-webworker/worker-exports
       react:
         specifier: ^18.2.0
         version: 18.2.0
@@ -1396,6 +1423,10 @@ importers:
       miniflare:
         specifier: ^1.4.1
         version: 1.4.1
+
+  playground/ssr-webworker/browser-exports: {}
+
+  playground/ssr-webworker/worker-exports: {}
 
   playground/tailwind:
     dependencies:
@@ -4104,7 +4135,7 @@ packages:
     resolution: {integrity: sha512-R6JDUfiZbJA9cMiguQ7jxALsgiprjBeHL5ikpXfJCH62pPHtI+JdJ5xWj6Ev73yXSlYl86+blXn1kZHQ7uElxw==}
     engines: {node: ^14.18.0 || >=16.0.0}
     peerDependencies:
-      vite: ^4.0.0
+      vite: workspace:*
       vue: ^3.2.25
     dependencies:
       vite: link:packages/vite
@@ -7527,6 +7558,7 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
+    libc: [glibc]
     requiresBuild: true
     dev: true
     optional: true
@@ -7536,6 +7568,7 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
+    libc: [musl]
     requiresBuild: true
     dev: true
     optional: true
@@ -7545,6 +7578,7 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
+    libc: [glibc]
     requiresBuild: true
     dev: true
     optional: true
@@ -7554,6 +7588,7 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
+    libc: [musl]
     requiresBuild: true
     dev: true
     optional: true
@@ -10730,6 +10765,19 @@ packages:
         optional: true
     dev: true
 
+  /ws@8.18.0:
+    resolution: {integrity: sha512-8VbfWfHLbbwu3+N6OKsOMpBdT4kXPDDB9cJk2bJ6mh9ucxdlnNvH1e+roYkKmN9Nxw2yjz7VzeO9oOz2zJ04Pw==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+    dev: true
+
   /xtend@4.0.2:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
@@ -11032,6 +11080,16 @@ packages:
       dep-a: file:playground/preload/dep-a
     dev: true
 
+  file:playground/ssr-conditions/external:
+    resolution: {directory: playground/ssr-conditions/external, type: directory}
+    name: '@vitejs/test-ssr-conditions-external'
+    dev: false
+
+  file:playground/ssr-conditions/no-external:
+    resolution: {directory: playground/ssr-conditions/no-external, type: directory}
+    name: '@vitejs/test-ssr-conditions-no-external'
+    dev: false
+
   file:playground/ssr-deps/css-lib:
     resolution: {directory: playground/ssr-deps/css-lib, type: directory}
     name: '@vitejs/test-css-lib'
@@ -11164,6 +11222,16 @@ packages:
   file:playground/ssr-resolve/pkg-exports:
     resolution: {directory: playground/ssr-resolve/pkg-exports, type: directory}
     name: '@vitejs/test-resolve-pkg-exports'
+    dev: false
+
+  file:playground/ssr-webworker/browser-exports:
+    resolution: {directory: playground/ssr-webworker/browser-exports, type: directory}
+    name: '@vitejs/test-browser-exports'
+    dev: false
+
+  file:playground/ssr-webworker/worker-exports:
+    resolution: {directory: playground/ssr-webworker/worker-exports, type: directory}
+    name: '@vitejs/test-worker-exports'
     dev: false
 
   file:playground/worker/dep-to-optimize:
