@@ -159,7 +159,7 @@ vite-source-code
 
 
 
-package.json
+在 package.json 文件中：
 
 ```json
 "scripts": {
@@ -716,7 +716,9 @@ export async function _createServer(
 }
 ```
 
-总结 _createServer 函数比较核心的点：
+
+
+_createServer 函数流程：
 
 1. 通过 resolveConfig 结合用户输入的命令，以及 vite.config.js 和默认配置，生成一个 config 对象
 
@@ -843,6 +845,21 @@ export async function _createServer(
       - 开启 ws 服务
       - 执行插件 buildStart 钩子
       - 如果开启了依赖与构建，调用 initDepsOptimizer 预构建第三方模块
+
+
+
+总结 createServer 核心点：
+
+| **功能模块**   | **作用**                                                     |
+| -------------- | ------------------------------------------------------------ |
+| 合并配置       | 将命令行参数、配置文件（vite.config.js）和默认配置合并为统一的配置 |
+| 服务器实例化   | 创建 HTTP/HTTPS 服务器，支持 HTTP/2 和代理配置               |
+| 模块依赖图     | 构建 `ModuleGraph` 管理模块间的依赖关系，实现精准 HMR        |
+| 插件系统初始化 | 加载并排序插件，执行 `configureServer` 等钩子                |
+| 中间件流水线   | 挂载代码转换、静态资源服务、代理等中间件                     |
+| WebSocket 服务 | 建立 HMR 通信通道，实现浏览器与服务器的实时交互              |
+| 文件监听       | 通过 `chokidar` 监听文件变动，触发模块重编译和热更新         |
+| 预构建         | 预编译 node_modules 中的依赖                                 |
 
 
 
