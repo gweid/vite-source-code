@@ -1326,6 +1326,29 @@ export async function resolveConfig(
 
 ### pluginContainer
 
+插件容器主要由 `createPluginContainer` 函数创建，用于**创建插件容器，提供 Rollup 兼容的插件执行环境**
+
+
+
+**createPluginContainer 函数逻辑：**
+
+> vite/packages/vite/src/node/server/pluginContainer.ts
+
+```js
+```
+
+
+
+
+
+### 请求处理
+
+
+
+
+
+### 模块图谱
+
 
 
 
