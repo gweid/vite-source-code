@@ -273,6 +273,7 @@ async function loadAndTransform(
   if (server._restartPromise && !ssr) throwClosedServerError()
 
   // ensure module in graph after successful load
+  // ! 调用 moduleGraph._ensureEntryFromUrl 函数创建模块依赖图
   mod ??= await moduleGraph._ensureEntryFromUrl(url, ssr, undefined, resolved)
   ensureWatchedFile(watcher, mod.file, root)
 

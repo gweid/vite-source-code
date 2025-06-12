@@ -1877,7 +1877,287 @@ createPluginContainer 核心逻辑主要是两个：
 
 
 
-### 请求处理与模块依赖图
+### 模块依赖图
+
+为了方便管理各个模块之间的依赖关系，Vite 在 Dev Server 中创建了模块依赖图的数据结构
+
+
+
+**创建依赖图**主要分为三个步骤:
+
+- 初始化依赖图实例
+- 创建依赖图节点
+- 绑定各个模块节点的依赖关系
+
+
+
+#### 初始化依赖图
+
+首先，在 createServer 中，会通过 `new ModuleGrap` 初始化依赖图
+
+
+
+> vite/packages/vite/src/node/server/moduleGraph.ts
+
+```js
+export class ModuleGraph {
+  // ! key:：模块的 URL 路径，通常是浏览器请求的路径；value：对应的 ModuleNode 实例
+  // ! 用于通过 URL 快速查找模块
+  urlToModuleMap = new Map<string, ModuleNode>()
+  // ! key：模块的规范化 ID；value：对应的 ModuleNode 实例
+  // ! 用于通过模块 ID 快速查找模块
+  idToModuleMap = new Map<string, ModuleNode>()
+  // a single file may corresponds to multiple modules with different queries
+  // ! key：文件路径，通常是文件系统中的绝对路径；value：与该文件关联的所有 ModuleNode 实例的集合
+  // ! 处理一个文件可能对应多个模块的情况
+  fileToModulesMap = new Map<string, Set<ModuleNode>>()
+  safeModulesPath = new Set<string>()
+
+  constructor(
+    private resolveId: (
+      url: string,
+      ssr: boolean,
+    ) => Promise<PartialResolvedId | null>,
+  ) {}
+
+  // ! 通过 url 获取模块
+  async getModuleByUrl(
+
+  }
+
+  // ! 通过模块 id 获取模块
+  getModuleById(id: string): ModuleNode | undefined {
+    return this.idToModuleMap.get(removeTimestampQuery(id))
+  }
+
+  // ! 通过文件路径获取模块
+  getModulesByFile(file: string): Set<ModuleNode> | undefined {
+    return this.fileToModulesMap.get(file)
+  }
+
+  // ! 当文件变化时，更新模块为不可用
+  onFileChange(file: string): void {
+
+  }
+
+  // ! 更新模块为不可用，用于处理文件变化时的热更新
+  invalidateModule(
+
+  }
+
+  // ! 更新所有模块为不可用状态
+  invalidateAll(): void {
+
+  }
+
+  // ! 更新模块之间的依赖关系
+  async updateModuleInfo(
+    mod: ModuleNode, // ! 当前模块
+    importedModules: Set<string | ModuleNode>, // ! 当前模块引入的模块
+    importedBindings: Map<string, Set<string>> | null,
+    acceptedModules: Set<string | ModuleNode>, // ! 当前模块明确接受热更新的依赖模块
+    acceptedExports: Set<string> | null,
+    isSelfAccepting: boolean,
+    ssr?: boolean,
+  ): Promise<Set<ModuleNode> | undefined> {
+    
+  }
+
+  // ! 调用 _ensureEntryFromUrl 创建模块节点
+  async ensureEntryFromUrl(
+    rawUrl: string,
+    ssr?: boolean,
+    setIsSelfAccepting = true,
+  ): Promise<ModuleNode> {
+    return this._ensureEntryFromUrl(rawUrl, ssr, setIsSelfAccepting)
+  }
+
+  /**
+   * @internal
+   */
+  // ! 
+  async _ensureEntryFromUrl(
+    rawUrl: string,
+    ssr?: boolean,
+    setIsSelfAccepting = true,
+    // Optimization, avoid resolving the same url twice if the caller already did it
+    resolved?: PartialResolvedId,
+  ): Promise<ModuleNode> {
+
+    const modPromise = (async () => {
+      const [url, resolvedId, meta] = await this._resolveUrl(
+        rawUrl,
+        ssr,
+        resolved,
+      )
+      mod = this.idToModuleMap.get(resolvedId)
+      if (!mod) {
+        // ! 创建模块节点
+        mod = new ModuleNode(url, setIsSelfAccepting)
+
+
+      return mod
+    })()
+
+    return modPromise
+  }
+}
+```
+
+ModuleGrap 这个类：
+
+- 定义了几个 Map，用来记录模块信息
+
+  ```js
+  // ! key:：模块的 URL 路径，通常是浏览器请求的路径；value：对应的 ModuleNode 实例
+  // ! 用于通过 URL 快速查找模块
+  urlToModuleMap = new Map<string, ModuleNode>()
+  
+  
+  // ! key：模块的规范化 ID；value：对应的 ModuleNode 实例
+  // ! 用于通过模块 ID 快速查找模块
+  idToModuleMap = new Map<string, ModuleNode>()
+  
+  
+  // ! key：文件路径，通常是文件系统中的绝对路径；value：与该文件关联的所有 ModuleNode 实例的集合
+  // ! 处理一个文件可能对应多个模块的情况
+  fileToModulesMap = new Map<string, Set<ModuleNode>>()
+  ```
+
+- 定义 getModuleByUrl 方法，允许通过 url 获取模块
+
+- 定义 getModuleById 方法，允许通过模块 id 获取模块
+
+- 定义 getModulesByFile 方法，允许通过文件路径获取模块
+
+- 定义 onFileChange 方法，当文件变化时，更新模块为不可用
+
+  - 文件变化了，那么关联的模块不可用了，标记不可用，通过 HMR 通知浏览器
+
+- 定义 invalidateModule 方法，更新模块为不可用，用于处理文件变化时的热更新
+
+- 定义 updateModuleInfo 更新模块间依赖关系
+
+- 定义 ensureEntryFromUrl 方法，调用 _ensureEntryFromUrl 创建模块节点
+
+  - _ensureEntryFromUrl 中会通过 new ModuleNode 创建模块节点
+
+
+
+ModuleNode 节点定义：
+
+```js
+class ModuleNode {
+  /**
+   * Public served url path, starts with /
+   */
+  // ! 原始请求 url
+  url: string
+  /**
+   * Resolved file system path + query
+   */
+  // ! 模块 id
+  id: string | null = null
+  // ! 文件路径
+  file: string | null = null
+  type: 'js' | 'css'
+  info?: ModuleInfo
+  meta?: Record<string, any>
+  // ! 当前模块的引用放
+  importers = new Set<ModuleNode>()
+  // ! 当前模块的依赖，区分是否 ssr
+  clientImportedModules = new Set<ModuleNode>()
+  ssrImportedModules = new Set<ModuleNode>()
+  acceptedHmrDeps = new Set<ModuleNode>()
+  acceptedHmrExports: Set<string> | null = null
+  importedBindings: Map<string, Set<string>> | null = null
+  isSelfAccepting?: boolean
+  transformResult: TransformResult | null = null
+  ssrTransformResult: TransformResult | null = null
+  ssrModule: Record<string, any> | null = null
+  ssrError: Error | null = null
+  lastHMRTimestamp = 0
+  lastInvalidationTimestamp = 0
+
+  constructor(url: string, setIsSelfAccepting = true) {
+    this.url = url
+    this.type = isDirectCSSRequest(url) ? 'css' : 'js'
+    if (setIsSelfAccepting) {
+      this.isSelfAccepting = false
+    }
+  }
+}
+```
+
+这里面主要是 imports 和 clientImportedModules，分别代表了当前模块被哪些模块引用以及它依赖了哪些模块，是构建整个模块依赖图的核心
+
+
+
+#### 创建依赖图节点
+
+初始化依赖图实例后，什么时候调用 _ensureEntryFromUrl 方法创建依赖图节点呢？
+
+答案是在 `transform`中间件中。`transform`中间件会对所有模块进行处理，此时就会给当前模块创建模块节点
+
+
+
+ `transform`中间件的主要逻辑是调用 `transformRequest`方法
+
+```text
+transformRequest --> doTransform --> loadAndTransform
+```
+
+
+
+最终，在 loadAndTransform 中会调用 moduleGraph._ensureEntryFromUrl 函数创建模块依赖图
+
+```js
+async function loadAndTransform() {
+  // ...
+  
+  mod ??= await moduleGraph._ensureEntryFromUrl(url, ssr, undefined, resolved)
+}
+```
+
+
+
+#### 构建模块依赖关系
+
+各个模块节点的依赖关系是在 vite 内置插件 import-analysis 中绑定
+
+```js
+export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
+  
+  // ...
+  
+  return {
+    name: 'vite:import-analysis',
+    
+    async transform(source, importer, options) {
+      // ...
+
+      // ! 绑定更新模块依赖关系
+      const prunedImports = await moduleGraph.updateModuleInfo(
+        importerModule,
+        importedUrls,
+        importedBindings,
+        normalizedAcceptedUrls,
+        isPartiallySelfAccepting ? acceptedExports : null,
+        isSelfAccepting,
+        ssr,
+      )
+    }
+  }
+}
+```
+
+
+
+模块经过 `vite:import-analysis`的 transform 钩子处理，所有模块之间的依赖关系会被记录下来，构建出整个依赖图的信息
+
+
+
+### 模块转换
 
 
 

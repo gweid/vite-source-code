@@ -811,6 +811,9 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
         ) {
           isSelfAccepting = true
         }
+
+        // ! 绑定更新模块依赖关系
+        // ! moduleGraph.updateModuleInfo 返回的是不再被导入的模块集合
         const prunedImports = await moduleGraph.updateModuleInfo(
           importerModule,
           importedUrls,

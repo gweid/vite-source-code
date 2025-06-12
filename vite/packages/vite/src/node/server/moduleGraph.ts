@@ -14,16 +14,21 @@ export class ModuleNode {
   /**
    * Public served url path, starts with /
    */
+  // ! 原始请求 url
   url: string
   /**
    * Resolved file system path + query
    */
+  // ! 模块 id
   id: string | null = null
+  // ! 文件路径
   file: string | null = null
   type: 'js' | 'css'
   info?: ModuleInfo
   meta?: Record<string, any>
+  // ! 当前模块的引用放
   importers = new Set<ModuleNode>()
+  // ! 当前模块的依赖，区分是否 ssr
   clientImportedModules = new Set<ModuleNode>()
   ssrImportedModules = new Set<ModuleNode>()
   acceptedHmrDeps = new Set<ModuleNode>()
@@ -64,9 +69,15 @@ export type ResolvedUrl = [
 ]
 
 export class ModuleGraph {
+  // ! key:：模块的 URL 路径，通常是浏览器请求的路径；value：对应的 ModuleNode 实例
+  // ! 用于通过 URL 快速查找模块
   urlToModuleMap = new Map<string, ModuleNode>()
+  // ! key：模块的规范化 ID；value：对应的 ModuleNode 实例
+  // ! 用于通过模块 ID 快速查找模块
   idToModuleMap = new Map<string, ModuleNode>()
   // a single file may corresponds to multiple modules with different queries
+  // ! key：文件路径，通常是文件系统中的绝对路径；value：与该文件关联的所有 ModuleNode 实例的集合
+  // ! 处理一个文件可能对应多个模块的情况
   fileToModulesMap = new Map<string, Set<ModuleNode>>()
   safeModulesPath = new Set<string>()
 
@@ -92,6 +103,7 @@ export class ModuleGraph {
     ) => Promise<PartialResolvedId | null>,
   ) {}
 
+  // ! 通过 url 获取模块
   async getModuleByUrl(
     rawUrl: string,
     ssr?: boolean,
@@ -107,24 +119,30 @@ export class ModuleGraph {
     return this.urlToModuleMap.get(url)
   }
 
+  // ! 通过模块 id 获取模块
   getModuleById(id: string): ModuleNode | undefined {
     return this.idToModuleMap.get(removeTimestampQuery(id))
   }
 
+  // ! 通过文件路径获取模块
   getModulesByFile(file: string): Set<ModuleNode> | undefined {
     return this.fileToModulesMap.get(file)
   }
 
+  // ! 当文件变化时，更新模块为不可用
   onFileChange(file: string): void {
+    // ! 通过 getModulesByFile 获取模块
     const mods = this.getModulesByFile(file)
     if (mods) {
       const seen = new Set<ModuleNode>()
       mods.forEach((mod) => {
+        // ! 更新模块为不可用
         this.invalidateModule(mod, seen)
       })
     }
   }
 
+  // ! 更新模块为不可用，用于处理文件变化时的热更新
   invalidateModule(
     mod: ModuleNode,
     seen: Set<ModuleNode> = new Set(),
@@ -161,6 +179,7 @@ export class ModuleGraph {
     })
   }
 
+  // ! 更新所有模块为不可用状态
   invalidateAll(): void {
     const timestamp = Date.now()
     const seen = new Set<ModuleNode>()
@@ -174,11 +193,12 @@ export class ModuleGraph {
    * If there are dependencies that no longer have any importers, they are
    * returned as a Set.
    */
+  // ! 更新模块之间的依赖关系
   async updateModuleInfo(
-    mod: ModuleNode,
-    importedModules: Set<string | ModuleNode>,
+    mod: ModuleNode, // ! 当前模块
+    importedModules: Set<string | ModuleNode>, // ! 当前模块引入的模块
     importedBindings: Map<string, Set<string>> | null,
-    acceptedModules: Set<string | ModuleNode>,
+    acceptedModules: Set<string | ModuleNode>, // ! 当前模块明确接受热更新的依赖模块
     acceptedExports: Set<string> | null,
     isSelfAccepting: boolean,
     ssr?: boolean,
@@ -190,7 +210,9 @@ export class ModuleGraph {
     let resolvePromises = []
     let resolveResults = new Array(importedModules.size)
     let index = 0
+
     // update import graph
+    // ! 处理所有导入的模块，建立导入关系
     for (const imported of importedModules) {
       const nextIndex = index++
       if (typeof imported === 'string') {
@@ -218,6 +240,7 @@ export class ModuleGraph {
     }
 
     // remove the importer from deps that were imported but no longer are.
+    // ! 处理不再被导入的模块
     prevImports.forEach((dep) => {
       if (
         !mod.clientImportedModules.has(dep) &&
@@ -231,6 +254,7 @@ export class ModuleGraph {
       }
     })
 
+    // ! 处理接受热更新的依赖模块
     // update accepted hmr deps
     resolvePromises = []
     resolveResults = new Array(acceptedModules.size)
@@ -252,14 +276,17 @@ export class ModuleGraph {
       await Promise.all(resolvePromises)
     }
 
+    // ! 更新模块接受热更新的依赖集合
     mod.acceptedHmrDeps = new Set(resolveResults)
 
+    // ! 更新模块接受热更新的导出和导入绑定，并返回不再被导入的模块集合
     // update accepted hmr exports
     mod.acceptedHmrExports = acceptedExports
     mod.importedBindings = importedBindings
     return noLongerImported
   }
 
+  // ! 调用 _ensureEntryFromUrl 创建模块节点
   async ensureEntryFromUrl(
     rawUrl: string,
     ssr?: boolean,
@@ -271,6 +298,7 @@ export class ModuleGraph {
   /**
    * @internal
    */
+  // ! 
   async _ensureEntryFromUrl(
     rawUrl: string,
     ssr?: boolean,
@@ -292,7 +320,9 @@ export class ModuleGraph {
       )
       mod = this.idToModuleMap.get(resolvedId)
       if (!mod) {
+        // ! 创建模块节点
         mod = new ModuleNode(url, setIsSelfAccepting)
+
         if (meta) mod.meta = meta
         this.urlToModuleMap.set(url, mod)
         mod.id = resolvedId
