@@ -304,8 +304,9 @@ export interface ResolvedBuildOptions
   modulePreload: false | ResolvedModulePreloadOptions
 }
 
+// ! 生成构建配置对象（config.build）
 export function resolveBuildOptions(
-  raw: BuildOptions | undefined,
+  raw: BuildOptions | undefined, // ! config.build 属性
   logger: Logger,
   root: string,
 ): ResolvedBuildOptions {
@@ -331,6 +332,7 @@ export function resolveBuildOptions(
     polyfill: true,
   }
 
+  // ! 默认的 build 配置
   const defaultBuildOptions: BuildOptions = {
     outDir: 'dist',
     assetsDir: 'assets',
@@ -353,6 +355,7 @@ export function resolveBuildOptions(
     watch: null,
   }
 
+  // ! 合并 vite.config.js 中的 build 配置 和默认的配置 defaultBuildOptions
   const userBuildOptions = raw
     ? mergeConfig(defaultBuildOptions, raw)
     : defaultBuildOptions
@@ -385,6 +388,14 @@ export function resolveBuildOptions(
   }
 
   // handle special build targets
+  // ! modules 是默认浏览器兼容配置，使用
+  // const ESBUILD_MODULES_TARGET = [
+  //   'es2020', // support import.meta.url
+  //   'edge88',
+  //   'firefox78',
+  //   'chrome87',
+  //   'safari14',
+  // ]
   if (resolved.target === 'modules') {
     resolved.target = ESBUILD_MODULES_TARGET
   } else if (resolved.target === 'esnext' && resolved.minify === 'terser') {
@@ -404,6 +415,7 @@ export function resolveBuildOptions(
     } catch {}
   }
 
+  // ! 没有单独配置 cssTarget，使用默认的
   if (!resolved.cssTarget) {
     resolved.cssTarget = resolved.target
   }
@@ -413,10 +425,12 @@ export function resolveBuildOptions(
     resolved.minify = false
   }
 
+  // ! 开启了压缩，默认使用 esbuild 压缩
   if (resolved.minify === true) {
     resolved.minify = 'esbuild'
   }
 
+  // ! 是否开启 css 压缩
   if (resolved.cssMinify == null) {
     resolved.cssMinify = !!resolved.minify
   }

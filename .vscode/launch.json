@@ -16,7 +16,7 @@
         "<node_internals>/**"
       ],
       "resolveSourceMapLocations": [
-        "${workspaceFolder}/**"
+        "${workspaceFolder}/**",
       ],
       "cwd": "${workspaceFolder}/vite-debug",
       "type": "node",

@@ -26,6 +26,7 @@ import { metadataPlugin } from './metadata'
 import { dynamicImportVarsPlugin } from './dynamicImportVars'
 import { importGlobPlugin } from './importMetaGlob'
 
+// ! 加载 vite 所有默认插件(这里可以查看到所有 vite 默认插件)
 export async function resolvePlugins(
   config: ResolvedConfig,
   prePlugins: Plugin[],

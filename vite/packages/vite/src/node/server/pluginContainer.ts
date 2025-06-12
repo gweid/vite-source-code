@@ -152,6 +152,7 @@ type PluginContext = Omit<
 
 export let parser = acorn.Parser
 
+// ! 创建插件容器，提供 Rollup 兼容的插件执行环境
 export async function createPluginContainer(
   config: ResolvedConfig,
   moduleGraph?: ModuleGraph,

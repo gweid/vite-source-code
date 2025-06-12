@@ -158,7 +158,7 @@ function createNodeConfig(isProduction: boolean) {
     },
     output: {
       ...sharedNodeOptions.output,
-      sourcemap: !isProduction,
+      sourcemap: true,
     },
     external: [
       'fsevents',
@@ -190,7 +190,7 @@ function createCjsConfig(isProduction: boolean) {
       format: 'cjs',
       externalLiveBindings: false,
       freeze: false,
-      sourcemap: false,
+      sourcemap: true,
     },
     external: [
       'fsevents',

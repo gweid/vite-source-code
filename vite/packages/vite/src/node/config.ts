@@ -429,21 +429,25 @@ export type ResolveFn = (
   ssr?: boolean,
 ) => Promise<string | undefined>
 
-// 解释配置 vite.config.js 文件，生成一个 config 对象
+// ! ​解析和标准化用户配置​​，将命令行参数、配置文件（vite.config.js）和默认配置合并为统一的配置对象
 export async function resolveConfig(
-  inlineConfig: InlineConfig,
+  inlineConfig: InlineConfig, // 命令行配置
   command: 'build' | 'serve',
   defaultMode = 'development',
   defaultNodeEnv = 'development',
 ): Promise<ResolvedConfig> {
+  // ! 命令行配置
   let config = inlineConfig
   let configFileDependencies: string[] = []
   let mode = inlineConfig.mode || defaultMode
+
+  // ! 判断是否设置了 NODE_ENV
   const isNodeEnvSet = !!process.env.NODE_ENV
   const packageCache: PackageCache = new Map()
 
   // some dependencies e.g. @vue/compiler-* relies on NODE_ENV for getting
   // production-specific behavior, so set it early on
+  // ! 没有设置 NODE_ENV 时，设置为默认环境
   if (!isNodeEnvSet) {
     process.env.NODE_ENV = defaultNodeEnv
   }
@@ -456,13 +460,16 @@ export async function resolveConfig(
 
   let { configFile } = config
   if (configFile !== false) {
+    // ! 加载 vite.config.js 配置文件
     const loadResult = await loadConfigFromFile(
       configEnv,
       configFile,
       config.root,
       config.logLevel,
     )
+
     if (loadResult) {
+      // ! 合并命令行配置和 vite.config.js 配置
       config = mergeConfig(loadResult.config, config)
       configFile = loadResult.path
       configFileDependencies = loadResult.dependencies
@@ -470,6 +477,7 @@ export async function resolveConfig(
   }
 
   // user config may provide an alternative mode. But --mode has a higher priority
+  // ! 命令行的 mode 优先级高于 vite.config.js 的 mode
   mode = inlineConfig.mode || config.mode || mode
   configEnv.mode = mode
 
@@ -484,23 +492,32 @@ export async function resolveConfig(
       return p.apply === command
     }
   }
+
   // Some plugins that aren't intended to work in the bundling of workers (doing post-processing at build time for example).
   // And Plugins may also have cached that could be corrupted by being used in these extra rollup calls.
   // So we need to separate the worker plugin from the plugin that vite needs to run.
+  // ! 从配置中提取并过滤出适用于 Worker 环境的插件列表。明确区分 Worker 和主线程的插件
   const rawWorkerUserPlugins = (
     (await asyncFlatten(config.worker?.plugins || [])) as Plugin[]
   ).filter(filterPlugin)
 
   // resolve plugins
+  // ! 将配置的插件（config.plugins）进行​​扁平化、过滤无效项​​，最终生成一个纯净的插件数组
+  // 可能是 plugins = [ plugin1, [plugin2] ]
   const rawUserPlugins = (
     (await asyncFlatten(config.plugins || [])) as Plugin[]
   ).filter(filterPlugin)
 
+  // ! sortUserPlugins 会根据 enforce 属性，将插件分为 pre、normal、post 三类
   const [prePlugins, normalPlugins, postPlugins] =
     sortUserPlugins(rawUserPlugins)
 
   // run config hooks
+  // ! 将 pre、normal、post 三类插件合并为一个数组，这样就实现了排序
+  // 插件执行顺序：prePlugins -> normalPlugins -> postPlugins
   const userPlugins = [...prePlugins, ...normalPlugins, ...postPlugins]
+
+  // ! 执行所有插件的 config 钩子
   config = await runConfigHook(config, userPlugins, configEnv)
 
   // If there are custom commonjsOptions, don't force optimized deps for this test
@@ -528,6 +545,7 @@ export async function resolveConfig(
     config.root ? path.resolve(config.root) : process.cwd(),
   )
 
+  // ! 默认的 alias
   const clientAlias = [
     {
       find: /^\/?@vite\/env/,
@@ -540,10 +558,12 @@ export async function resolveConfig(
   ]
 
   // resolve alias with internal client alias
+  // ! 将 vite.config.js 的 alias 和 默认的 alias 合并
   const resolvedAlias = normalizeAlias(
     mergeAlias(clientAlias, config.resolve?.alias || []),
   )
 
+  // ! Vite 中模块解析配置对象的初始化，它定义了 Vite 如何解析和查找模块文件
   const resolveOptions: ResolvedConfig['resolve'] = {
     mainFields: config.resolve?.mainFields ?? DEFAULT_MAIN_FIELDS,
     browserField: config.resolve?.browserField ?? true,
@@ -555,6 +575,7 @@ export async function resolveConfig(
   }
 
   // load .env files
+  // ! 加载对应的 .env 文件
   const envDir = config.envDir
     ? normalizePath(path.resolve(resolvedRoot, config.envDir))
     : resolvedRoot
@@ -579,6 +600,7 @@ export async function resolveConfig(
     }
   }
 
+  // ! 判断是否是生产环境
   const isProduction = process.env.NODE_ENV === 'production'
 
   // resolve public base url
@@ -588,12 +610,27 @@ export async function resolveConfig(
   // During dev, we ignore relative base and fallback to '/'
   // For the SSR build, relative base isn't possible by means
   // of import.meta.url.
+  // ! 处理 base
   const resolvedBase = relativeBaseShortcut
     ? !isBuild || config.build?.ssr
       ? '/'
       : './'
     : resolveBaseUrl(config.base, isBuild, logger) ?? '/'
 
+  /**
+   * ! 通过 resolveBuildOptions 生成一个构建配置对象(config.build)
+   * 
+   * build: {
+   *   assetsInlineLimit: 8 *1024,
+   *   rollupOptions: {
+   *     output: {
+   *       manualChunks: {
+   *         'react-vendor': ['react', 'react-dom']
+   *     }
+   *   }
+   * }
+  }
+   */
   const resolvedBuildOptions = resolveBuildOptions(
     config.build,
     logger,
@@ -601,6 +638,7 @@ export async function resolveConfig(
   )
 
   // resolve cache directory
+  // ! 设置缓存目录。如果有设置 config.cacheDir，使用设置的，没有，使用默认的 node_modules/.vite
   const pkgDir = findNearestPackageData(resolvedRoot, packageCache)?.dir
   const cacheDir = normalizePath(
     config.cacheDir
@@ -610,6 +648,8 @@ export async function resolveConfig(
       : path.join(resolvedRoot, `.vite`),
   )
 
+  // ! 处理 assetsInclude
+  // ! assetsInclude 作用：配置 vite 可以额外解析哪些静态文件（vite有默认支持的文件类型）
   const assetsFilter =
     config.assetsInclude &&
     (!Array.isArray(config.assetsInclude) || config.assetsInclude.length)
@@ -618,6 +658,7 @@ export async function resolveConfig(
 
   // create an internal resolver to be used in special scenarios, e.g.
   // optimizer & handling css @imports
+  // ! 用于创建内部模块解析器，主要用于特殊场景如依赖优化和处理 CSS @imports
   const createResolver: ResolvedConfig['createResolver'] = (options) => {
     let aliasContainer: PluginContainer | undefined
     let resolverContainer: PluginContainer | undefined
@@ -661,6 +702,7 @@ export async function resolveConfig(
     }
   }
 
+  // ! 处理 config.publicDir，默认使用 public
   const { publicDir } = config
   const resolvedPublicDir =
     publicDir !== false && publicDir !== ''
@@ -685,6 +727,7 @@ export async function resolveConfig(
 
   const BASE_URL = resolvedBase
 
+  // ~ --------------------- 处理 workerPlugin start-----------------------
   // resolve worker
   let workerConfig = mergeConfig({}, config)
   const [workerPrePlugins, workerNormalPlugins, workerPostPlugins] =
@@ -696,6 +739,7 @@ export async function resolveConfig(
     ...workerNormalPlugins,
     ...workerPostPlugins,
   ]
+  // ! 执行 workerUserPlugin 的 config 钩子
   workerConfig = await runConfigHook(workerConfig, workerUserPlugins, configEnv)
   const resolvedWorkerOptions: ResolveWorkerOptions = {
     format: workerConfig.worker?.format || 'iife',
@@ -705,6 +749,11 @@ export async function resolveConfig(
     getSortedPluginHooks: undefined!,
   }
 
+  // ~ --------------------- 处理 workerPlugin end-----------------------
+
+
+  // ! Vite 默认的已解析配置对象，包含了所有标准化和默认值处理后的配置项
+  // ! 可以简单理解为 vite 的默认配置
   const resolvedConfig: ResolvedConfig = {
     configFile: configFile ? normalizePath(configFile) : undefined,
     configFileDependencies: configFileDependencies.map((name) =>
@@ -774,11 +823,15 @@ export async function resolveConfig(
     getSortedPlugins: undefined!,
     getSortedPluginHooks: undefined!,
   }
+
+
+  // ! 合并经过处理的 用户配置 和 vite 默认配置
   const resolved: ResolvedConfig = {
-    ...config,
-    ...resolvedConfig,
+    ...config, // ! 用户配置（已部分处理）
+    ...resolvedConfig, // ! 完全解析后的配置（优先级更高）
   }
 
+  // ! 加载所有 vite 默认插件
   ;(resolved.plugins as Plugin[]) = await resolvePlugins(
     resolved,
     prePlugins,
@@ -805,6 +858,7 @@ export async function resolveConfig(
   )
 
   // call configResolved hooks
+  // ! 执行插件的 configResolved 钩子
   await Promise.all([
     ...resolved
       .getSortedPluginHooks('configResolved')
@@ -815,7 +869,7 @@ export async function resolveConfig(
   ])
 
   // validate config
-
+  // ~ ------------------ 后面都是一些检验，控制台告警
   if (middlewareMode === 'ssr') {
     logger.warn(
       colors.yellow(
@@ -901,6 +955,7 @@ assetFileNames isn't equal for every build.rollupOptions.output. A single patter
     )
   }
 
+  // ! 将最终配置返回
   return resolved
 }
 
@@ -948,6 +1003,7 @@ export function resolveBaseUrl(
   return base
 }
 
+// 根据 enforce 属性，将插件分为 pre、normal、post 三类
 export function sortUserPlugins(
   plugins: (Plugin | Plugin[])[] | undefined,
 ): [Plugin[], Plugin[], Plugin[]] {
@@ -966,10 +1022,11 @@ export function sortUserPlugins(
   return [prePlugins, normalPlugins, postPlugins]
 }
 
+// 加载 vite.config.js 配置文件
 export async function loadConfigFromFile(
   configEnv: ConfigEnv,
   configFile?: string,
-  configRoot: string = process.cwd(),
+  configRoot: string = process.cwd(), // 执行 npm dev 命令的根目录
   logLevel?: LogLevel,
 ): Promise<{
   path: string
@@ -987,6 +1044,14 @@ export async function loadConfigFromFile(
   } else {
     // implicit config file loaded from inline root (if present)
     // otherwise from cwd
+    // const DEFAULT_CONFIG_FILES = [
+    //   'vite.config.js',
+    //   'vite.config.mjs',
+    //   'vite.config.ts',
+    //   'vite.config.cjs',
+    //   'vite.config.mts',
+    //   'vite.config.cts',
+    // ]
     for (const filename of DEFAULT_CONFIG_FILES) {
       const filePath = path.resolve(configRoot, filename)
       if (!fs.existsSync(filePath)) continue
@@ -996,11 +1061,18 @@ export async function loadConfigFromFile(
     }
   }
 
+  // 如果没有 vite.config.js 配置文件，则返回 null
   if (!resolvedPath) {
     debug?.('no config file found.')
     return null
   }
 
+  /**
+   * ! 下面主要判断是否是 ESModule
+   *  - 如果 vite 配置文件是 .mjs 或 .mts 文件，则认为是 ESModule
+   *  - 如果 vite 配置文件是 .cjs 或 .cts 文件，则认为是 CommonJS
+   *  - 否则，检查 package.json 中的 type 字段，如果为 module，则认为是 ESModule
+   */
   let isESM = false
   if (/\.m[jt]s$/.test(resolvedPath)) {
     isESM = true
@@ -1016,20 +1088,44 @@ export async function loadConfigFromFile(
   }
 
   try {
+    /**
+     * ! 将 vite.config 配置文件编译为 js。为什么需要这样做？
+     * ! 因为 vite 配置文件可以是：
+     *  - 'vite.config.js'
+     *  - 'vite.config.mjs'
+     *  - 'vite.config.ts'
+     *  - 'vite.config.cjs'
+     *  - 'vite.config.mts'
+     *  - 'vite.config.cts'
+     */
     const bundled = await bundleConfigFile(resolvedPath, isESM)
+
+    // 将 bundleConfigFile 编译后的配置文件代码（如 vite.config.ts 的编译结果）​​动态加载为用户配置对象
     const userConfig = await loadConfigFromBundledFile(
       resolvedPath,
       bundled.code,
       isESM,
     )
+
     debug?.(`bundled config file loaded in ${getTime()}`)
 
+    // 如果 userConfig 是一个函数，则调用该函数，否则直接返回用户配置
     const config = await (typeof userConfig === 'function'
       ? userConfig(configEnv)
       : userConfig)
+
     if (!isObject(config)) {
       throw new Error(`config must export or return an object.`)
     }
+
+    /**
+     * ! 返回配置
+     * {
+     *  path: '/Users/gweid/Desktop/study/vite-source-code/vite-debug/vite.config.ts',
+     *  config: { plugins: [...] },
+     *  dependencies: 'vite.config.ts',
+     * }
+     */
     return {
       path: normalizePath(resolvedPath),
       config,
@@ -1044,6 +1140,7 @@ export async function loadConfigFromFile(
   }
 }
 
+// 使用 esbuild 将 .ts 、mts 等结尾的 vite.config 编译为 js
 async function bundleConfigFile(
   fileName: string,
   isESM: boolean,
@@ -1051,6 +1148,8 @@ async function bundleConfigFile(
   const dirnameVarName = '__vite_injected_original_dirname'
   const filenameVarName = '__vite_injected_original_filename'
   const importMetaUrlVarName = '__vite_injected_original_import_meta_url'
+
+  // 使用 esbuild 将 vite.config.js 配置文件编译为 js
   const result = await build({
     absWorkingDir: process.cwd(),
     entryPoints: [fileName],
@@ -1209,6 +1308,8 @@ interface NodeModuleWithCompile extends NodeModule {
 }
 
 const _require = createRequire(import.meta.url)
+
+// 将 bundleConfigFile 编译后的配置文件代码，​​动态执行并提取出用户配置对象​​
 async function loadConfigFromBundledFile(
   fileName: string,
   bundledCode: string,
@@ -1223,10 +1324,13 @@ async function loadConfigFromBundledFile(
       .slice(2)}`
     const fileNameTmp = `${fileBase}.mjs`
     const fileUrl = `${pathToFileURL(fileBase)}.mjs`
+    // 写入一个临时 vite.config.mjs 文件
     await fsp.writeFile(fileNameTmp, bundledCode)
     try {
+      // 动态导入临时文件，得到 vit.config
       return (await dynamicImport(fileUrl)).default
     } finally {
+      // 删除临时 vite.config.mjs 文件
       fs.unlink(fileNameTmp, () => {}) // Ignore errors
     }
   }
@@ -1255,6 +1359,7 @@ async function loadConfigFromBundledFile(
   }
 }
 
+// 执行所有插件的 config 钩子
 async function runConfigHook(
   config: InlineConfig,
   plugins: Plugin[],
@@ -1262,6 +1367,7 @@ async function runConfigHook(
 ): Promise<InlineConfig> {
   let conf = config
 
+  // 循环执行每个插件的 config 钩子
   for (const p of getSortedPluginsByHook('config', plugins)) {
     const hook = p.config
     const handler = hook && 'handler' in hook ? hook.handler : hook

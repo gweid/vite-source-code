@@ -6,7 +6,7 @@
 
 ## 调试 vite
 
-怎么添加 sourcemap 参考：https://juejin.cn/book/7070324244772716556/section/7159194044663332872
+需要将 vite下载下来，开启 sourcemap，并 build 构建出产物 dist，然后替换调试项目的 node_modules/vite/dist。具体参考：https://juejin.cn/book/7070324244772716556/section/7159194044663332872
 
 
 
@@ -153,9 +153,11 @@ vite-source-code
 
 ### createServer
 
+`createServer` 是 Vite 的核心，它整合了配置解析、插件系统、模块转换、HMR、文件监听等所有开发时需要的功能，为开发提供了快速、高效的开发服务器。
 
 
-#### npm run dev
+
+#### npm run dev 启动
 
 
 
@@ -221,7 +223,7 @@ cli
 
 
 
-#### createServer 的逻辑
+#### createServer 逻辑
 
 >  vite/packages/vite/src/node/server/index.ts
 
@@ -243,7 +245,9 @@ export async function _createServer(
 
 
 
-_createServer 函数解释：
+**_createServer 函数解释：**
+
+>  vite/packages/vite/src/node/server/index.ts
 
 ```js
 export async function _createServer(
@@ -402,12 +406,7 @@ export async function _createServer(
         getDepsOptimizer(server.config, true)?.close(),
         closeHttpServer(),
       ])
-      // Await pending requests. We throw early in transformRequest
-      // and in hooks if the server is closing for non-ssr requests,
-      // so the import analysis plugin stops pre-transforming static
-      // imports and this block is resolved sooner.
-      // During SSR, we let pending requests finish to avoid exposing
-      // the server closed error to the users.
+
       while (server._pendingRequests.size > 0) {
         await Promise.allSettled(
           [...server._pendingRequests.values()].map(
@@ -449,9 +448,6 @@ export async function _createServer(
     _forceOptimizeOnRestart: false,
     _pendingRequests: new Map(),
     _fsDenyGlob: picomatch(
-      // matchBase: true does not work as it's documented
-      // https://github.com/micromatch/picomatch/issues/89
-      // convert patterns without `/` on our side for now
       config.server.fs.deny.map((pattern) =>
         pattern.includes('/') ? pattern : `**/${pattern}`,
       ),
@@ -544,7 +540,6 @@ export async function _createServer(
     })
   }
 
-  // apply server configuration hooks from plugins
   /**
    * config.getSortedPluginHooks('configureServer')： 获取所有插件中注册的 configureServer 钩子函数，按插件顺序排序（遵循 Vite 的插件顺序规则，如 pre/normal/post 阶段）
    * 
@@ -585,9 +580,7 @@ export async function _createServer(
     )
   }
 
-  // host check (to prevent DNS rebinding attacks)
   const { allowedHosts } = serverConfig
-  // no need to check for HTTPS as HTTPS is not vulnerable to DNS rebinding attacks
   if (allowedHosts !== true && !serverConfig.https) {
     middlewares.use(hostCheckMiddleware(config, false))
   }
@@ -616,9 +609,6 @@ export async function _createServer(
     }
   })
 
-  // serve static files under /public
-  // this applies before the transform middleware so that these files are served
-  // as-is without transforms.
   // 处理 public 目录下的静态文件
   if (config.publicDir) {
     middlewares.use(
@@ -639,9 +629,6 @@ export async function _createServer(
     middlewares.use(htmlFallbackMiddleware(root, config.appType === 'spa'))
   }
 
-  // run post config hooks
-  // This is applied before the html middleware so that user middleware can
-  // serve custom content instead of index.html.
   // 执行上面收集到的 configureServer 钩子函数返回的回调函数
   postHooks.forEach((fn) => fn && fn())
 
@@ -650,8 +637,6 @@ export async function _createServer(
     // transform index.html
     middlewares.use(indexHtmlMiddleware(server))
 
-    // handle 404s
-    // Keep the named function. The name is visible in debug logs via `DEBUG=connect:dispatcher ...`
     // 处理路由刷新 404 问题
     middlewares.use(function vite404Middleware(_, res) {
       res.statusCode = 404
@@ -662,9 +647,6 @@ export async function _createServer(
   // error handler
   middlewares.use(errorMiddleware(server, middlewareMode))
 
-  // httpServer.listen can be called multiple times
-  // when port when using next port number
-  // this code is to avoid calling buildStart multiple times
   // 通过 serverInited 和 initingServer 两个标志位，避免并发调用导致的重复初始化
   let initingServer: Promise<void> | undefined
   let serverInited = false
@@ -689,7 +671,6 @@ export async function _createServer(
   }
 
   if (!middlewareMode && httpServer) {
-    // overwrite listen to init optimizer before server start
     const listen = httpServer.listen.bind(httpServer)
     // 当浏览器访问开发服务器时，Vite 在响应请求前会调用 httpServer.listen 方法
     httpServer.listen = (async (port: number, ...args: any[]) => {
@@ -848,7 +829,7 @@ _createServer 函数流程：
 
 
 
-总结 createServer 核心点：
+#### createServer 总结
 
 | **功能模块**   | **作用**                                                     |
 | -------------- | ------------------------------------------------------------ |
@@ -859,7 +840,7 @@ _createServer 函数流程：
 | 中间件流水线   | 挂载代码转换、静态资源服务、代理等中间件                     |
 | WebSocket 服务 | 建立 HMR 通信通道，实现浏览器与服务器的实时交互              |
 | 文件监听       | 通过 `chokidar` 监听文件变动，触发模块重编译和热更新         |
-| 预构建         | 预编译 node_modules 中的依赖                                 |
+| 依赖预构建     | 预编译 node_modules 中的依赖                                 |
 
 
 
@@ -869,7 +850,477 @@ _createServer 函数流程：
 
 
 
+#### resolveConfig 函数
 
+> vite/packages/vite/src/node/config.ts
+
+```js
+export async function resolveConfig(
+  inlineConfig: InlineConfig, // 命令行配置
+  command: 'build' | 'serve',
+  defaultMode = 'development',
+  defaultNodeEnv = 'development',
+): Promise<ResolvedConfig> {
+  // ! 命令行配置
+  let config = inlineConfig
+  let configFileDependencies: string[] = []
+  let mode = inlineConfig.mode || defaultMode
+
+  // ! 判断是否设置了 NODE_ENV
+  const isNodeEnvSet = !!process.env.NODE_ENV
+  const packageCache: PackageCache = new Map()
+
+  // ! 没有设置 NODE_ENV 时，设置为默认环境
+  if (!isNodeEnvSet) {
+    process.env.NODE_ENV = defaultNodeEnv
+  }
+
+  const configEnv = {
+    mode,
+    command,
+    ssrBuild: !!config.build?.ssr,
+  }
+
+  let { configFile } = config
+  if (configFile !== false) {
+    // ! 加载 vite.config.js 配置文件
+    const loadResult = await loadConfigFromFile(
+      configEnv,
+      configFile,
+      config.root,
+      config.logLevel,
+    )
+
+    if (loadResult) {
+      // ! 合并命令行配置和 vite.config.js 配置
+      config = mergeConfig(loadResult.config, config)
+      configFile = loadResult.path
+      configFileDependencies = loadResult.dependencies
+    }
+  }
+
+  // ! 命令行的 mode 优先级高于 vite.config.js 的 mode
+  mode = inlineConfig.mode || config.mode || mode
+  configEnv.mode = mode
+
+  const filterPlugin = (p: Plugin) => {
+    if (!p) {
+      return false
+    } else if (!p.apply) {
+      return true
+    } else if (typeof p.apply === 'function') {
+      return p.apply({ ...config, mode }, configEnv)
+    } else {
+      return p.apply === command
+    }
+  }
+
+  // ! 从配置中提取并过滤出适用于 Worker 环境的插件列表。明确区分 Worker 和主线程的插件
+  const rawWorkerUserPlugins = (
+    (await asyncFlatten(config.worker?.plugins || [])) as Plugin[]
+  ).filter(filterPlugin)
+
+  // resolve plugins
+  // ! 将配置的插件（config.plugins）进行​​扁平化、过滤无效项​​，最终生成一个纯净的插件数组
+  // 可能是 plugins = [ plugin1, [plugin2] ]
+  const rawUserPlugins = (
+    (await asyncFlatten(config.plugins || [])) as Plugin[]
+  ).filter(filterPlugin)
+
+  // ! sortUserPlugins 会根据 enforce 属性，将插件分为 pre、normal、post 三类
+  const [prePlugins, normalPlugins, postPlugins] =
+    sortUserPlugins(rawUserPlugins)
+
+  // ! 将 pre、normal、post 三类插件合并为一个数组，这样就实现了排序
+  // 插件执行顺序：prePlugins -> normalPlugins -> postPlugins
+  const userPlugins = [...prePlugins, ...normalPlugins, ...postPlugins]
+
+  // ! 执行所有插件的 config 钩子
+  config = await runConfigHook(config, userPlugins, configEnv)
+
+  if (
+    !config.build?.commonjsOptions &&
+    process.env.VITE_TEST_WITHOUT_PLUGIN_COMMONJS
+  ) {
+    config = mergeConfig(config, {
+      optimizeDeps: { disabled: false },
+      ssr: { optimizeDeps: { disabled: false } },
+    })
+    config.build ??= {}
+    config.build.commonjsOptions = { include: [] }
+  }
+
+  // Define logger
+  const logger = createLogger(config.logLevel, {
+    allowClearScreen: config.clearScreen,
+    customLogger: config.customLogger,
+  })
+
+  // resolve root
+  const resolvedRoot = normalizePath(
+    config.root ? path.resolve(config.root) : process.cwd(),
+  )
+
+  // ! 默认的 alias
+  const clientAlias = [
+    {
+      find: /^\/?@vite\/env/,
+      replacement: path.posix.join(FS_PREFIX, normalizePath(ENV_ENTRY)),
+    },
+    {
+      find: /^\/?@vite\/client/,
+      replacement: path.posix.join(FS_PREFIX, normalizePath(CLIENT_ENTRY)),
+    },
+  ]
+
+  // resolve alias with internal client alias
+  // ! 将 vite.config.js 的 alias 和 默认的 alias 合并
+  const resolvedAlias = normalizeAlias(
+    mergeAlias(clientAlias, config.resolve?.alias || []),
+  )
+
+  // ! Vite 中模块解析配置对象的初始化，它定义了 Vite 如何解析和查找模块文件
+  const resolveOptions: ResolvedConfig['resolve'] = {
+    mainFields: config.resolve?.mainFields ?? DEFAULT_MAIN_FIELDS,
+    browserField: config.resolve?.browserField ?? true,
+    conditions: config.resolve?.conditions ?? [],
+    extensions: config.resolve?.extensions ?? DEFAULT_EXTENSIONS,
+    dedupe: config.resolve?.dedupe ?? [],
+    preserveSymlinks: config.resolve?.preserveSymlinks ?? false,
+    alias: resolvedAlias,
+  }
+
+  // load .env files
+  // ! 加载对应的 .env 文件
+  const envDir = config.envDir
+    ? normalizePath(path.resolve(resolvedRoot, config.envDir))
+    : resolvedRoot
+  const userEnv =
+    inlineConfig.envFile !== false &&
+    loadEnv(mode, envDir, resolveEnvPrefix(config))
+
+  const userNodeEnv = process.env.VITE_USER_NODE_ENV
+  if (!isNodeEnvSet && userNodeEnv) {
+    if (userNodeEnv === 'development') {
+      process.env.NODE_ENV = 'development'
+    } else {
+      // NODE_ENV=production is not supported as it could break HMR in dev for frameworks like Vue
+      logger.warn(
+        `NODE_ENV=${userNodeEnv} is not supported in the .env file. ` +
+          `Only NODE_ENV=development is supported to create a development build of your project. ` +
+          `If you need to set process.env.NODE_ENV, you can set it in the Vite config instead.`,
+      )
+    }
+  }
+
+  // ! 判断是否是生产环境
+  const isProduction = process.env.NODE_ENV === 'production'
+
+  // resolve public base url
+  const isBuild = command === 'build'
+  const relativeBaseShortcut = config.base === '' || config.base === './'
+
+  // During dev, we ignore relative base and fallback to '/'
+  // For the SSR build, relative base isn't possible by means
+  // of import.meta.url.
+  // ! 处理 base
+  const resolvedBase = relativeBaseShortcut
+    ? !isBuild || config.build?.ssr
+      ? '/'
+      : './'
+    : resolveBaseUrl(config.base, isBuild, logger) ?? '/'
+
+  /**
+   * ! 通过 resolveBuildOptions 生成一个构建配置对象(config.build)
+   * 
+   * build: {
+   *   assetsInlineLimit: 8 *1024,
+   *   rollupOptions: {
+   *     output: {
+   *       manualChunks: {
+   *         'react-vendor': ['react', 'react-dom']
+   *     }
+   *   }
+   * }
+  }
+   */
+  const resolvedBuildOptions = resolveBuildOptions(
+    config.build,
+    logger,
+    resolvedRoot,
+  )
+
+  // resolve cache directory
+  // ! 设置缓存目录。如果有设置 config.cacheDir，使用设置的，没有，使用默认的 node_modules/.vite
+  const pkgDir = findNearestPackageData(resolvedRoot, packageCache)?.dir
+  const cacheDir = normalizePath(
+    config.cacheDir
+      ? path.resolve(resolvedRoot, config.cacheDir)
+      : pkgDir
+      ? path.join(pkgDir, `node_modules/.vite`)
+      : path.join(resolvedRoot, `.vite`),
+  )
+
+  // ! 处理 assetsInclude
+  // ! assetsInclude 作用：配置 vite 可以额外解析哪些静态文件（vite有默认支持的文件类型）
+  const assetsFilter =
+    config.assetsInclude &&
+    (!Array.isArray(config.assetsInclude) || config.assetsInclude.length)
+      ? createFilter(config.assetsInclude)
+      : () => false
+
+  // ! 用于创建内部模块解析器，主要用于特殊场景如依赖优化和处理 CSS @imports
+  const createResolver: ResolvedConfig['createResolver'] = (options) => {
+    let aliasContainer: PluginContainer | undefined
+    let resolverContainer: PluginContainer | undefined
+    return async (id, importer, aliasOnly, ssr) => {
+      let container: PluginContainer
+      if (aliasOnly) {
+        container =
+          aliasContainer ||
+          (aliasContainer = await createPluginContainer({
+            ...resolved,
+            plugins: [aliasPlugin({ entries: resolved.resolve.alias })],
+          }))
+      } else {
+        container =
+          resolverContainer ||
+          (resolverContainer = await createPluginContainer({
+            ...resolved,
+            plugins: [
+              aliasPlugin({ entries: resolved.resolve.alias }),
+              resolvePlugin({
+                ...resolved.resolve,
+                root: resolvedRoot,
+                isProduction,
+                isBuild: command === 'build',
+                ssrConfig: resolved.ssr,
+                asSrc: true,
+                preferRelative: false,
+                tryIndex: true,
+                ...options,
+                idOnly: true,
+              }),
+            ],
+          }))
+      }
+      return (
+        await container.resolveId(id, importer, {
+          ssr,
+          scan: options?.scan,
+        })
+      )?.id
+    }
+  }
+
+  // ! 处理 config.publicDir，默认使用 public
+  const { publicDir } = config
+  const resolvedPublicDir =
+    publicDir !== false && publicDir !== ''
+      ? path.resolve(
+          resolvedRoot,
+          typeof publicDir === 'string' ? publicDir : 'public',
+        )
+      : ''
+
+  const server = resolveServerOptions(resolvedRoot, config.server, logger)
+  const ssr = resolveSSROptions(
+    config.ssr,
+    resolveOptions.preserveSymlinks,
+    config.legacy?.buildSsrCjsExternalHeuristics,
+  )
+
+  const preview = resolvePreviewOptions(config.preview, server)
+
+  const middlewareMode = config?.server?.middlewareMode
+
+  const optimizeDeps = config.optimizeDeps || {}
+
+  const BASE_URL = resolvedBase
+
+  // ~ --------------------- 处理 workerPlugin start-----------------------
+  // resolve worker
+  let workerConfig = mergeConfig({}, config)
+  const [workerPrePlugins, workerNormalPlugins, workerPostPlugins] =
+    sortUserPlugins(rawWorkerUserPlugins)
+
+  // run config hooks
+  const workerUserPlugins = [
+    ...workerPrePlugins,
+    ...workerNormalPlugins,
+    ...workerPostPlugins,
+  ]
+  // ! 执行 workerUserPlugin 的 config 钩子
+  workerConfig = await runConfigHook(workerConfig, workerUserPlugins, configEnv)
+  const resolvedWorkerOptions: ResolveWorkerOptions = {
+    format: workerConfig.worker?.format || 'iife',
+    plugins: [],
+    rollupOptions: workerConfig.worker?.rollupOptions || {},
+    getSortedPlugins: undefined!,
+    getSortedPluginHooks: undefined!,
+  }
+
+  // ~ --------------------- 处理 workerPlugin end-----------------------
+
+
+  // ! Vite 默认的已解析配置对象，包含了所有标准化和默认值处理后的配置项
+  // ! 可以简单理解为 vite 的默认配置
+  const resolvedConfig: ResolvedConfig = {
+    configFile: configFile ? normalizePath(configFile) : undefined,
+    configFileDependencies: configFileDependencies.map((name) =>
+      normalizePath(path.resolve(name)),
+    ),
+    inlineConfig,
+    root: resolvedRoot,
+    base: withTrailingSlash(resolvedBase),
+    rawBase: resolvedBase,
+    resolve: resolveOptions,
+    publicDir: resolvedPublicDir,
+    cacheDir,
+    command,
+    mode,
+    ssr,
+    isWorker: false,
+    mainConfig: null,
+    isProduction,
+    plugins: userPlugins,
+    css: resolveCSSOptions(config.css),
+    esbuild:
+      config.esbuild === false
+        ? false
+        : {
+            jsxDev: !isProduction,
+            ...config.esbuild,
+          },
+    server,
+    build: resolvedBuildOptions,
+    preview,
+    envDir,
+    env: {
+      ...userEnv,
+      BASE_URL,
+      MODE: mode,
+      DEV: !isProduction,
+      PROD: isProduction,
+    },
+    assetsInclude(file: string) {
+      return DEFAULT_ASSETS_RE.test(file) || assetsFilter(file)
+    },
+    logger,
+    packageCache,
+    createResolver,
+    optimizeDeps: {
+      disabled: 'build',
+      ...optimizeDeps,
+      esbuildOptions: {
+        preserveSymlinks: resolveOptions.preserveSymlinks,
+        ...optimizeDeps.esbuildOptions,
+      },
+    },
+    worker: resolvedWorkerOptions,
+    appType: config.appType ?? (middlewareMode === 'ssr' ? 'custom' : 'spa'),
+    experimental: {
+      importGlobRestoreExtension: false,
+      hmrPartialAccept: false,
+      ...config.experimental,
+    },
+    webSocketToken: Buffer.from(
+      crypto.randomFillSync(new Uint8Array(9)),
+    ).toString('base64url'),
+    additionalAllowedHosts: getAdditionalAllowedHosts(server, preview),
+    getSortedPlugins: undefined!,
+    getSortedPluginHooks: undefined!,
+  }
+
+
+  // ! 合并经过处理的 用户配置 和 vite 默认配置
+  const resolved: ResolvedConfig = {
+    ...config, // ! 用户配置（已部分处理）
+    ...resolvedConfig, // ! 完全解析后的配置（优先级更高）
+  }
+
+  // ! 加载所有 vite 默认插件
+  ;(resolved.plugins as Plugin[]) = await resolvePlugins(
+    resolved,
+    prePlugins,
+    normalPlugins,
+    postPlugins,
+  )
+  Object.assign(resolved, createPluginHookUtils(resolved.plugins))
+
+  const workerResolved: ResolvedConfig = {
+    ...workerConfig,
+    ...resolvedConfig,
+    isWorker: true,
+    mainConfig: resolved,
+  }
+  resolvedConfig.worker.plugins = await resolvePlugins(
+    workerResolved,
+    workerPrePlugins,
+    workerNormalPlugins,
+    workerPostPlugins,
+  )
+  Object.assign(
+    resolvedConfig.worker,
+    createPluginHookUtils(resolvedConfig.worker.plugins),
+  )
+
+  // ! 执行插件的 configResolved 钩子
+  await Promise.all([
+    ...resolved
+      .getSortedPluginHooks('configResolved')
+      .map((hook) => hook(resolved)),
+    ...resolvedConfig.worker
+      .getSortedPluginHooks('configResolved')
+      .map((hook) => hook(workerResolved)),
+  ])
+
+  // validate config
+  // ~ ------------------ 后面都是一些检验，控制台告警
+  
+  // ...
+
+  // ! 将最终配置返回
+  return resolved
+}
+```
+
+
+
+**resolveConfig 具体逻辑：**
+
+1. 首先是对环境的判断，没有设置 NODE_ENV，那么设置为默认 `development`
+
+2. 加载 vite.confog 配置文件
+   - bundleConfigFile 使用 esbuild 将 vite.confog 编译成 js 文件（因为配置文件可能有多种格式，比如：.mjs、.mts、.cjs 等）
+   - loadConfigFromBundledFile 读取编译后的配置文件的配置
+   - 最后，合并用户配置（vite.config.js）和命令行配置
+3. 解释用户插件
+   - 分离普通插件和 Worker 环境的插件
+   - 将插件按照 enforce（pre、normal、post）进行排序
+   - 遍历执行所有插件的 config 钩子
+4. 将用户配置的 alias 和 vite 默认的 alias 合并
+5. 加载环境变量，加载处理对应的 .env 文件
+6. 设置缓存目录。如果有设置 config.cacheDir，使用设置的，没有，使用默认的 node_modules/.vite
+7. 处理 assetsInclude。assetsInclude 作用：配置 vite 可以额外解析哪些静态文件（vite有默认支持的文件类型）
+8. 通过 createResolver 创建内部模块解析器，主要用于特殊场景如依赖优化和处理 CSS @imports
+9. 处理 config.publicDir，默认使用 public
+10. 合并经过处理的 用户配置 和 vite 默认配置为最终配置
+11. 加载所有 vite 默认插件
+12. 返回最终配置
+
+
+
+#### resolveConfig 总结
+
+| **步骤**       | **具体操作**                                                 |
+| -------------- | ------------------------------------------------------------ |
+| 加载配置文件   | 读取并编译配置文件为 js                                      |
+| 路径标准化     | 将相对路径转为绝对路径（如 `root: './src'` → `root: '/project/src'`） |
+| 解析用户插件   | 扁平化插件数组，按 `enforce` 排序（`pre` → `normal` → `post`），执行所有插件 config 钩子 |
+| 加载环境变量   | 加载 `.env` 文件，填充 `import.meta.env`                     |
+| 生成插件流水线 | 加载所有 vite 内置插件                                       |
+| 合并最终配置   | 合并命令行配置、用户配置、默认配置为最终配置                 |
 
 
 
