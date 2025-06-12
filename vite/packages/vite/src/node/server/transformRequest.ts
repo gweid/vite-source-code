@@ -47,10 +47,12 @@ export interface TransformOptions {
   allowId?: (id: string) => boolean
 }
 
+// ! 将请求的模块源代码转换为浏览器可以直接执行的代码
+// ! Vite 按需编译策略的核心实现，它处理模块的加载、转换和缓存
 export function transformRequest(
-  url: string,
-  server: ViteDevServer,
-  options: TransformOptions = {},
+  url: string, // ! 请求模块的 url
+  server: ViteDevServer, // ! Vite 开发服务器实例
+  options: TransformOptions = {}, // ! 转换选项，包括是否为 SSR、HTML 处理等
 ): Promise<TransformResult | null> {
   if (server._restartPromise && !options.ssr) throwClosedServerError()
 
@@ -78,6 +80,12 @@ export function transformRequest(
   // last time this module is invalidated
   const timestamp = Date.now()
 
+  /**
+   * ! 缓存系统，避免重复转换相同的模块
+   *  ! - 根据 URL 和转换选项生成缓存键
+   *  ! - 检查是否有正在处理的相同请求，如果有则复用结果
+   *  ! - 处理模块失效情况，确保不使用过期的缓存
+   */
   const pending = server._pendingRequests.get(cacheKey)
   if (pending) {
     return server.moduleGraph
@@ -99,6 +107,7 @@ export function transformRequest(
       })
   }
 
+  // ! 通过 doTransform 执行实际的转换工作
   const request = doTransform(url, server, options, timestamp)
 
   // Avoid clearing the cache of future requests if aborted
@@ -132,6 +141,9 @@ async function doTransform(
   const prettyUrl = debugCache ? prettifyUrl(url, config.root) : ''
   const ssr = !!options.ssr
 
+  // ! ------------------- 模块解析 start
+  // ! 尝试从模块图中获取已存在的模块
+  // 
   const module = await server.moduleGraph.getModuleByUrl(url, ssr)
 
   // check if we have a fresh cache
@@ -148,13 +160,17 @@ async function doTransform(
     return cached
   }
 
+  // ! 如果模块不存在，则使用插件系统解析模块 ID
   const resolved = module
     ? undefined
     : (await pluginContainer.resolveId(url, undefined, { ssr })) ?? undefined
 
+  // ! ------------------- 模块解析 end
+
   // resolve
   const id = module?.id ?? resolved?.id ?? url
 
+  // ! 通过 loadAndTransform 进行模块加载和转换
   const result = loadAndTransform(
     id,
     url,
@@ -165,11 +181,13 @@ async function doTransform(
     resolved,
   )
 
+  // ! 与依赖预构建系统集成，确保依赖优化在模块转换完成后进行
   getDepsOptimizer(config, ssr)?.delayDepsOptimizerUntil(id, () => result)
 
   return result
 }
 
+// ! 模块加载和转换
 async function loadAndTransform(
   id: string,
   url: string,
@@ -198,7 +216,10 @@ async function loadAndTransform(
 
   // load
   const loadStart = debugLoad ? performance.now() : 0
+  // ! 加载模块内容
   const loadResult = await pluginContainer.load(id, { ssr })
+
+  // ! pluginContainer.load 没加载到内容，尝试使用 fsp.readFile 读取模块内容
   if (loadResult == null) {
     // if this is an html request and there is no load result, skip ahead to
     // SPA fallback.
@@ -279,6 +300,7 @@ async function loadAndTransform(
 
   // transform
   const transformStart = debugTransform ? performance.now() : 0
+  // ! 通过插件容器的 transform 钩子转换模块代码。这一步会应用所有插件的转换逻辑
   const transformResult = await pluginContainer.transform(code, id, {
     inMap: map,
     ssr,
@@ -298,6 +320,7 @@ async function loadAndTransform(
     map = transformResult.map
   }
 
+  // ! 处理 sourcemap
   if (map && mod.file) {
     map = (typeof map === 'string' ? JSON.parse(map) : map) as SourceMap
     if (map.mappings) {
@@ -347,6 +370,7 @@ async function loadAndTransform(
 
   // Only cache the result if the module wasn't invalidated while it was
   // being processed, so it is re-processed next time if it is stale
+  // ! 缓存结果
   if (timestamp > mod.lastInvalidationTimestamp) {
     if (ssr) mod.ssrTransformResult = result
     else mod.transformResult = result

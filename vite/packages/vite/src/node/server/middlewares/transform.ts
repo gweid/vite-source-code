@@ -82,6 +82,8 @@ function deniedServingAccessForTransform(
   return false
 }
 
+// ! 负责处理模块转换请求
+// ! 拦截对 JavaScript、CSS、HTML 等资源的请求，并通过插件系统对这些资源进行转换处理
 export function transformMiddleware(
   server: ViteDevServer,
 ): Connect.NextHandleFunction {
@@ -92,10 +94,12 @@ export function transformMiddleware(
 
   // Keep the named function. The name is visible in debug logs via `DEBUG=connect:dispatcher ...`
   return async function viteTransformMiddleware(req, res, next) {
+    // ! 过滤请求
     if (req.method !== 'GET' || knownIgnoreList.has(req.url!)) {
       return next()
     }
 
+    // ! url 处理
     let url: string
     try {
       url = decodeURI(removeTimestampQuery(req.url!)).replace(
@@ -109,6 +113,7 @@ export function transformMiddleware(
     const withoutQuery = cleanUrl(url)
 
     try {
+      // ! sourceMap 处理
       const isSourceMap = withoutQuery.endsWith('.map')
       // since we generate source map references, handle those requests here
       if (isSourceMap) {
@@ -219,7 +224,7 @@ export function transformMiddleware(
         return
       }
 
-      // ! 如果是 js、import、css、html 请求
+      // ! 识别请求的资源类型，并针对不同类型进行特定处理
       if (
         isJSRequest(url) ||
         isImportRequest(url) ||
@@ -243,6 +248,7 @@ export function transformMiddleware(
         }
 
         // check if we can return 304 early
+        // ! 检查请求头中的 If-None-Match 与模块的 ETag 是否匹配，如果匹配则返回 304 状态码，告诉浏览器使用缓存。
         const ifNoneMatch = req.headers['if-none-match']
         if (
           ifNoneMatch &&
@@ -255,12 +261,15 @@ export function transformMiddleware(
         }
 
         // resolve, load and transform using the plugin container
+        // ! 调用 transformRequest 函数进行实际的模块转换，这是整个中间件的核心部分
         const result = await transformRequest(url, server, {
           html: req.headers.accept?.includes('text/html'),
           allowId(id) {
             return !deniedServingAccessForTransform(id, server, res, next)
           },
         })
+
+        // ! 将转换结果发送给浏览器，设置适当的 MIME 类型、缓存控制和 ETag
         if (result) {
           const depsOptimizer = getDepsOptimizer(server.config, false) // non-ssr
           const type = isDirectCSSRequest(url) ? 'css' : 'js'

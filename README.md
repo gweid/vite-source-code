@@ -2159,7 +2159,439 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
 
 ### 模块转换
 
+模块转换主要在 transformMiddleware 中间件中
 
+transformMiddleware 中间件的作用：负责处理模块转换请求，拦截对 JavaScript、CSS、HTML 等资源的请求，并通过插件系统对这些资源进行转换处理，以实现按需编译、热模块替换等核心功能
+
+
+
+#### transformMiddleware
+
+```js
+// ! 负责处理模块转换请求
+// ! 拦截对 JavaScript、CSS、HTML 等资源的请求，并通过插件系统对这些资源进行转换处理
+export function transformMiddleware(
+  server: ViteDevServer,
+): Connect.NextHandleFunction {
+  const {
+    config: { root, logger },
+    moduleGraph,
+  } = server
+
+  return async function viteTransformMiddleware(req, res, next) {
+    // ! 过滤请求
+    if (req.method !== 'GET' || knownIgnoreList.has(req.url!)) {
+      return next()
+    }
+
+    // ! url 处理
+    let url: string
+    try {
+      url = decodeURI(removeTimestampQuery(req.url!)).replace(
+        NULL_BYTE_PLACEHOLDER,
+        '\0',
+      )
+    } catch (e) {
+      return next(e)
+    }
+
+    const withoutQuery = cleanUrl(url)
+
+    try {
+      // ! sourceMap 处理
+      const isSourceMap = withoutQuery.endsWith('.map')
+
+      if (isSourceMap) {
+        const depsOptimizer = getDepsOptimizer(server.config, false) // non-ssr
+        if (depsOptimizer?.isOptimizedDepUrl(url)) {
+
+          const sourcemapPath = url.startsWith(FS_PREFIX)
+            ? fsPathFromId(url)
+            : normalizePath(path.resolve(root, url.slice(1)))
+          try {
+            const map = JSON.parse(
+              await fsp.readFile(sourcemapPath, 'utf-8'),
+            ) as ExistingRawSourceMap
+
+            applySourcemapIgnoreList(
+              map,
+              sourcemapPath,
+              server.config.server.sourcemapIgnoreList,
+              logger,
+            )
+
+            return send(req, res, JSON.stringify(map), 'json', {
+              headers: server.config.server.headers,
+            })
+          } catch (e) {
+            // Outdated source map request for optimized deps, this isn't an error
+            // but part of the normal flow when re-optimizing after missing deps
+            // Send back an empty source map so the browser doesn't issue warnings
+            const dummySourceMap = {
+              version: 3,
+              file: sourcemapPath.replace(/\.map$/, ''),
+              sources: [],
+              sourcesContent: [],
+              names: [],
+              mappings: ';;;;;;;;;',
+            }
+            return send(req, res, JSON.stringify(dummySourceMap), 'json', {
+              cacheControl: 'no-cache',
+              headers: server.config.server.headers,
+            })
+          }
+        } else {
+          const originalUrl = url.replace(/\.map($|\?)/, '$1')
+          const map = (await moduleGraph.getModuleByUrl(originalUrl, false))
+            ?.transformResult?.map
+          if (map) {
+            return send(req, res, JSON.stringify(map), 'json', {
+              headers: server.config.server.headers,
+            })
+          } else {
+            return next()
+          }
+        }
+      }
+
+      // ...
+
+      // ! 识别请求的资源类型，并针对不同类型进行特定处理
+      if (
+        isJSRequest(url) ||
+        isImportRequest(url) ||
+        isCSSRequest(url) ||
+        isHTMLProxy(url)
+      ) {
+        // strip ?import
+        url = removeImportQuery(url)
+
+        url = unwrapId(url)
+
+        if (
+          isCSSRequest(url) &&
+          !isDirectRequest(url) &&
+          req.headers.accept?.includes('text/css')
+        ) {
+          url = injectQuery(url, 'direct')
+        }
+
+        // ! 检查请求头中的 If-None-Match 与模块的 ETag 是否匹配，如果匹配则返回 304 状态码，告诉浏览器使用缓存。
+        const ifNoneMatch = req.headers['if-none-match']
+        if (
+          ifNoneMatch &&
+          (await moduleGraph.getModuleByUrl(url, false))?.transformResult
+            ?.etag === ifNoneMatch
+        ) {
+          debugCache?.(`[304] ${prettifyUrl(url, root)}`)
+          res.statusCode = 304
+          return res.end()
+        }
+
+        // ! 调用 transformRequest 函数进行实际的模块转换，这是整个中间件的核心部分
+        const result = await transformRequest(url, server, {
+          html: req.headers.accept?.includes('text/html'),
+          allowId(id) {
+            return !deniedServingAccessForTransform(id, server, res, next)
+          },
+        })
+
+        // ! 将转换结果发送给浏览器，设置适当的 MIME 类型、缓存控制和 ETag
+        if (result) {
+          const depsOptimizer = getDepsOptimizer(server.config, false) // non-ssr
+          const type = isDirectCSSRequest(url) ? 'css' : 'js'
+          const isDep =
+            DEP_VERSION_RE.test(url) || depsOptimizer?.isOptimizedDepUrl(url)
+          return send(req, res, result.code, type, {
+            etag: result.etag,
+            // allow browser to cache npm deps!
+            cacheControl: isDep ? 'max-age=31536000,immutable' : 'no-cache',
+            headers: server.config.server.headers,
+            map: result.map,
+          })
+        }
+      }
+    } catch (e) {
+      // ...
+    }
+
+    next()
+  }
+}
+```
+
+- 过滤请求，不是 Get 请求的不做处理（资源都是 get 请求）
+- url 处理
+- sourceMap 处理
+- 识别请求的资源类型，并针对不同类型进行特定处理
+- 检查请求头中的 If-None-Match 与模块的 ETag 是否匹配，如果匹配则返回 304 状态码，告诉浏览器使用缓存
+- 调用 transformRequest 函数进行实际的模块转换，这是整个中间件的核心部分
+- 将转换结果发送给浏览器，设置适当的 MIME 类型、缓存控制和 ETag
+
+
+
+#### transformRequest
+
+```js
+// ! 将请求的模块源代码转换为浏览器可以直接执行的代码
+// ! Vite 按需编译策略的核心实现，它处理模块的加载、转换和缓存
+export function transformRequest(
+  url: string, // ! 请求模块的 url
+  server: ViteDevServer, // ! Vite 开发服务器实例
+  options: TransformOptions = {}, // ! 转换选项，包括是否为 SSR、HTML 处理等
+): Promise<TransformResult | null> {
+  if (server._restartPromise && !options.ssr) throwClosedServerError()
+
+  const cacheKey = (options.ssr ? 'ssr:' : options.html ? 'html:' : '') + url
+
+  const timestamp = Date.now()
+
+  /**
+   * ! 缓存系统，避免重复转换相同的模块
+   *  ! - 根据 URL 和转换选项生成缓存键
+   *  ! - 检查是否有正在处理的相同请求，如果有则复用结果
+   *  ! - 处理模块失效情况，确保不使用过期的缓存
+   */
+  const pending = server._pendingRequests.get(cacheKey)
+  if (pending) {
+    return server.moduleGraph
+      .getModuleByUrl(removeTimestampQuery(url), options.ssr)
+      .then((module) => {
+        if (!module || pending.timestamp > module.lastInvalidationTimestamp) {
+          // The pending request is still valid, we can safely reuse its result
+          return pending.request
+        } else {
+
+          pending.abort()
+          return transformRequest(url, server, options)
+        }
+      })
+  }
+
+  // ! 通过 doTransform 执行实际的转换工作
+  const request = doTransform(url, server, options, timestamp)
+
+  // Avoid clearing the cache of future requests if aborted
+  let cleared = false
+  const clearCache = () => {
+    if (!cleared) {
+      server._pendingRequests.delete(cacheKey)
+      cleared = true
+    }
+  }
+
+  // Cache the request and clear it once processing is done
+  server._pendingRequests.set(cacheKey, {
+    request,
+    timestamp,
+    abort: clearCache,
+  })
+
+  return request.finally(clearCache)
+}
+
+
+
+async function doTransform(
+  url: string,
+  server: ViteDevServer,
+  options: TransformOptions,
+  timestamp: number,
+) {
+  url = removeTimestampQuery(url)
+
+  const { config, pluginContainer } = server
+  const prettyUrl = debugCache ? prettifyUrl(url, config.root) : ''
+  const ssr = !!options.ssr
+
+  // ! ------------------- 模块解析 start
+  // ! 尝试从模块图中获取已存在的模块
+  // 
+  const module = await server.moduleGraph.getModuleByUrl(url, ssr)
+
+  // check if we have a fresh cache
+  const cached =
+    module && (ssr ? module.ssrTransformResult : module.transformResult)
+  if (cached) {
+
+    debugCache?.(`[memory] ${prettyUrl}`)
+    return cached
+  }
+
+  // ! 如果模块不存在，则使用插件系统解析模块 ID
+  const resolved = module
+    ? undefined
+    : (await pluginContainer.resolveId(url, undefined, { ssr })) ?? undefined
+
+  // ! ------------------- 模块解析 end
+
+  // resolve
+  const id = module?.id ?? resolved?.id ?? url
+
+  // ! 通过 loadAndTransform 进行模块加载和转换
+  const result = loadAndTransform(
+    id,
+    url,
+    server,
+    options,
+    timestamp,
+    module,
+    resolved,
+  )
+
+  // ! 与依赖预构建系统集成，确保依赖优化在模块转换完成后进行
+  getDepsOptimizer(config, ssr)?.delayDepsOptimizerUntil(id, () => result)
+
+  return result
+}
+
+
+
+// ! 模块加载和转换
+async function loadAndTransform(
+  id: string,
+  url: string,
+  server: ViteDevServer,
+  options: TransformOptions,
+  timestamp: number,
+  mod?: ModuleNode,
+  resolved?: PartialResolvedId,
+) {
+
+  // ...
+
+  let code: string | null = null
+  let map: SourceDescription['map'] = null
+
+  // load
+  const loadStart = debugLoad ? performance.now() : 0
+  // ! 加载模块内容
+  const loadResult = await pluginContainer.load(id, { ssr })
+
+  // ! pluginContainer.load 没加载到内容，尝试使用 fsp.readFile 读取模块内容
+  if (loadResult == null) {
+    // if this is an html request and there is no load result, skip ahead to
+    // SPA fallback.
+    if (options.html && !id.endsWith('.html')) {
+      return null
+    }
+
+    if (options.ssr || isFileServingAllowed(file, server)) {
+      try {
+        code = await fsp.readFile(file, 'utf-8')
+        debugLoad?.(`${timeFrom(loadStart)} [fs] ${prettyUrl}`)
+      } catch (e) {
+        if (e.code !== 'ENOENT') {
+          if (e.code === 'EISDIR') {
+            e.message = `${e.message} ${file}`
+          }
+          throw e
+        }
+      }
+    }
+    if (code) {
+      try {
+        map = (
+          convertSourceMap.fromSource(code) ||
+          (await convertSourceMap.fromMapFileSource(
+            code,
+            createConvertSourceMapReadMap(file),
+          ))
+        )?.toObject()
+
+        code = code.replace(convertSourceMap.mapFileCommentRegex, blankReplacer)
+      } catch (e) {
+        logger.warn(`Failed to load source map for ${url}.`, {
+          timestamp: true,
+        })
+      }
+    }
+  } else {
+    debugLoad?.(`${timeFrom(loadStart)} [plugin] ${prettyUrl}`)
+    if (isObject(loadResult)) {
+      code = loadResult.code
+      map = loadResult.map
+    } else {
+      code = loadResult
+    }
+  }
+
+  // ...
+
+  if (server._restartPromise && !ssr) throwClosedServerError()
+
+
+  // ! 调用 moduleGraph._ensureEntryFromUrl 函数创建模块依赖图
+  mod ??= await moduleGraph._ensureEntryFromUrl(url, ssr, undefined, resolved)
+  ensureWatchedFile(watcher, mod.file, root)
+
+ 
+  // transform
+  const transformStart = debugTransform ? performance.now() : 0
+  // ! 通过插件容器的 transform 钩子转换模块代码。这一步会应用所有插件的转换逻辑
+  const transformResult = await pluginContainer.transform(code, id, {
+    inMap: map,
+    ssr,
+  })
+
+  // ...
+
+  // ! 处理 sourcemap
+  if (map && mod.file) {
+    map = (typeof map === 'string' ? JSON.parse(map) : map) as SourceMap
+
+    // ...
+  }
+
+  if (server._restartPromise && !ssr) throwClosedServerError()
+
+  const result =
+    ssr && !server.config.experimental.skipSsrTransform
+      ? await server.ssrTransform(code, map as SourceMap, url, originalCode)
+      : ({
+          code,
+          map,
+          etag: getEtag(code, { weak: true }),
+        } as TransformResult)
+
+  // ! 缓存结果
+  if (timestamp > mod.lastInvalidationTimestamp) {
+    if (ssr) mod.ssrTransformResult = result
+    else mod.transformResult = result
+  }
+
+  return result
+}
+```
+
+
+
+ transformRequest 函数是实际执行模块转换的地方，流程：
+
+1. 缓存检查：检查模块是否已经被转换过，如果有缓存且未失效则直接返回缓存结果
+2. 模块解析：通过插件容器的 resolveId 钩子解析模块 ID
+3. 加载模块：通过 loadAndTransform 函数加载模块内容
+4. 转换处理：
+   - 调用插件容器的 load 钩子加载模块内容
+   - 创建模块节点
+   - 调用插件容器的 transform 钩子对模块内容进行转换
+   - 收集依赖信息
+5. 结果返回：返回转换后的代码、sourcemap 和其他元数据
+
+
+
+#### 模块转换总结
+
+transformMiddleware 和 transformRequest 的核心
+
+| **功能**       | **说明**                                                     |
+| -------------- | ------------------------------------------------------------ |
+| 模块请求拦截   | 拦截 `/@id/`、`/node_modules/` 等特定路径的请求。            |
+| 按需编译       | 调用插件链（`pluginContainer.transform`），实时编译并返回转换后的代码 |
+| 依赖解析       | 处理模块之间的导入关系，构建模块依赖图                       |
+| HMR 注入       | 为模块注入热更新客户端代码（`import.meta.hot`）              |
+| Sourcemap 生成 | 开发环境下内联 sourcemap，便于调试                           |
+| 缓存控制       | 强缓存协商（`304 Not Modified`），实现高效的缓存策略，避免重复编译 |
 
 
 

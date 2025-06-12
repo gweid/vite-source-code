@@ -723,6 +723,8 @@ export async function _createServer(
 
   // main transform middleware
   // ! 对模块进行编译（重要！！！）
+  // ! 负责处理模块转换请求
+  // ! 拦截对 JavaScript、CSS、HTML 等资源的请求，并通过插件系统对这些资源进行转换处理
   middlewares.use(transformMiddleware(server))
 
   // serve static files
