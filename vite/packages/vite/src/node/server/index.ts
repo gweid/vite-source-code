@@ -600,9 +600,10 @@ export async function _createServer(
   watcher.on('change', async (file) => {
     file = normalizePath(file)
     // invalidate module graph cache on file change
+    // ! 更新依赖图
     moduleGraph.onFileChange(file)
 
-    // 触发 HMR 更新
+    // ! 触发 HMR 更新
     await onHMRUpdate(file, false)
   })
 
