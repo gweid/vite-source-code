@@ -833,7 +833,7 @@ _createServer 函数流程：
 
 | **功能模块**   | **作用**                                                     |
 | -------------- | ------------------------------------------------------------ |
-| 合并配置       | 将命令行参数、配置文件（vite.config.js）和默认配置合并为统一的配置 |
+| 解释合并配置   | 将命令行参数、配置文件（vite.config.js）和默认配置合并为统一的配置 |
 | 服务器实例化   | 创建 HTTP/HTTPS 服务器，支持 HTTP/2 和代理配置               |
 | 模块依赖图     | 构建 `ModuleGraph` 管理模块间的依赖关系，实现精准 HMR        |
 | 插件系统初始化 | 加载并排序插件，执行 `configureServer` 等钩子                |
@@ -1330,24 +1330,554 @@ export async function resolveConfig(
 
 
 
-**createPluginContainer 函数逻辑：**
+#### createPluginContainer 函数
+
+
 
 > vite/packages/vite/src/node/server/pluginContainer.ts
 
 ```js
+/**
+ * ! 创建插件容器，提供 Rollup 兼容的插件执行环境
+ * 
+ * ! 核心逻辑就两个：
+ *   ! - 实现插件钩子内部的 Context 上下文对象
+ *   ! - 实现 plugin container 对 Rollup 插件钩子进行调度
+ */
+export async function createPluginContainer(
+  config: ResolvedConfig, // ! 解释合并后的配置
+  moduleGraph?: ModuleGraph, // ! 模块图谱
+  watcher?: FSWatcher, // ! 文件监听实例
+): Promise<PluginContainer> {
+
+  // ....
+
+  // ---------------------------------------------------------------------------
+
+  // ! 存储所有通过插件系统添加到文件监听列表中的文件路径
+  // ! 当插件调用 addWatchFile() 方法时，文件路径会被添加到这个集合中
+  const watchFiles = new Set<string>()
+
+
+  /**
+   * ! 提供了插件执行时的最小上下文环境，包含了插件可以使用的基本方法和元数据
+   *    - 为插件提供基本的运行环境
+   *    - 在不需要完整插件容器功能时提供轻量级的上下文，用于某些不需要完整上下文的插件
+   */
+  const minimalContext: MinimalPluginContext = {
+    meta: {
+      rollupVersion,
+      watchMode: true,
+    },
+    debug: noop,
+    info: noop,
+    warn: noop,
+    // @ts-expect-error noop
+    error: noop,
+  }
+
+  // 辅助告警函数：当插件使用了不兼容的方法时，显示警告信息
+  function warnIncompatibleMethod(method: string, plugin: string) {
+    logger.warn(
+      colors.cyan(`[plugin:${plugin}] `) +
+        colors.yellow(
+          `context method ${colors.bold(
+            `${method}()`,
+          )} is not supported in serve mode. This plugin is likely not vite-compatible.`,
+        ),
+    )
+  }
+
+  // parallel, ignores returns
+  async function hookParallel<H extends AsyncPluginHooks & ParallelPluginHooks>(
+    hookName: H,
+    context: (plugin: Plugin) => ThisType<FunctionPluginHooks[H]>,
+    args: (plugin: Plugin) => Parameters<FunctionPluginHooks[H]>,
+  ): Promise<void> {
+    const parallelPromises: Promise<unknown>[] = []
+    for (const plugin of getSortedPlugins(hookName)) {
+      // Don't throw here if closed, so buildEnd and closeBundle hooks can finish running
+      const hook = plugin[hookName]
+      if (!hook) continue
+
+      const handler: Function = 'handler' in hook ? hook.handler : hook
+      if ((hook as { sequential?: boolean }).sequential) {
+        await Promise.all(parallelPromises)
+        parallelPromises.length = 0
+        await handler.apply(context(plugin), args(plugin))
+      } else {
+        parallelPromises.push(handler.apply(context(plugin), args(plugin)))
+      }
+    }
+    await Promise.all(parallelPromises)
+  }
+
+  // ! 创建一个代理，用于拦截对模块信息的访问，当访问不支持的属性时抛出错误
+  const ModuleInfoProxy: ProxyHandler<ModuleInfo> = {
+    get(info: any, key: string) {
+      if (key in info) {
+        return info[key]
+      }
+      // Don't throw an error when returning from an async function
+      if (key === 'then') {
+        return undefined
+      }
+      throw Error(
+        `[vite] The "${key}" property of ModuleInfo is not supported.`,
+      )
+    },
+  }
+
+  // same default value of "moduleInfo.meta" as in Rollup
+  const EMPTY_OBJECT = Object.freeze({})
+
+  // ! 获取模块信息
+  function getModuleInfo(id: string) {
+    const module = moduleGraph?.getModuleById(id)
+    if (!module) {
+      return null
+    }
+    if (!module.info) {
+      module.info = new Proxy(
+        { id, meta: module.meta || EMPTY_OBJECT } as ModuleInfo,
+        ModuleInfoProxy,
+      )
+    }
+    return module.info
+  }
+
+  // ! 更新模块信息
+  function updateModuleInfo(id: string, { meta }: { meta?: object | null }) {
+    if (meta) {
+      const moduleInfo = getModuleInfo(id)
+      if (moduleInfo) {
+        moduleInfo.meta = { ...moduleInfo.meta, ...meta }
+      }
+    }
+  }
+
+
+  // ! 实现 Rollup 插件上下文接口，提供插件执行所需的环境
+  // ! 可以理解为 rollupContext 的 vite 的实现
+  // ! 为什么？因为在插件容器只在开发环境用到，有部分 rollup 方法是不需要的
+  // ! 生产环境 vite 直接用 rollup
+  class Context implements PluginContext {
+    meta = minimalContext.meta
+    ssr = false
+    _scan = false
+    _activePlugin: Plugin | null
+    _activeId: string | null = null
+    _activeCode: string | null = null
+    _resolveSkips?: Set<Plugin>
+    _addedImports: Set<string> | null = null
+
+    constructor(initialPlugin?: Plugin) {
+      this._activePlugin = initialPlugin || null
+    }
+
+    // ! 解析代码为 ast
+    parse(code: string, opts: any = {}) {
+      return parser.parse(code, {
+        sourceType: 'module',
+        ecmaVersion: 'latest',
+        locations: true,
+        ...opts,
+      })
+    }
+
+    // ! 解析模块路径
+    async resolve(
+      id: string,
+      importer?: string,
+      options?: {
+        assertions?: Record<string, string>
+        custom?: CustomPluginOptions
+        isEntry?: boolean
+        skipSelf?: boolean
+      },
+    ) {
+      let skip: Set<Plugin> | undefined
+      if (options?.skipSelf && this._activePlugin) {
+        skip = new Set(this._resolveSkips)
+        skip.add(this._activePlugin)
+      }
+      let out = await container.resolveId(id, importer, {
+        assertions: options?.assertions,
+        custom: options?.custom,
+        isEntry: !!options?.isEntry,
+        skip,
+        ssr: this.ssr,
+        scan: this._scan,
+      })
+      if (typeof out === 'string') out = { id: out }
+      return out as ResolvedId | null
+    }
+
+    // ! 加载模块
+    async load(
+      options: {
+        id: string
+        resolveDependencies?: boolean
+      } & Partial<PartialNull<ModuleOptions>>,
+    ): Promise<ModuleInfo> {
+      await moduleGraph?.ensureEntryFromUrl(unwrapId(options.id), this.ssr)
+
+      updateModuleInfo(options.id, options)
+
+      await container.load(options.id, { ssr: this.ssr })
+      const moduleInfo = this.getModuleInfo(options.id)
+
+      if (!moduleInfo)
+        throw Error(`Failed to load module with id ${options.id}`)
+      return moduleInfo
+    }
+
+    // ! 获取模块信息
+    // ! 上下文对象与模块依赖图相结合，是为了实现开发时的 HMR
+    getModuleInfo(id: string) {
+      return getModuleInfo(id)
+    }
+
+    // ! 获取所有模块 id
+    getModuleIds() {
+      return moduleGraph
+        ? moduleGraph.idToModuleMap.keys()
+        : Array.prototype[Symbol.iterator]()
+    }
+
+    // ! 添加监听文件
+    addWatchFile(id: string) {
+      watchFiles.add(id)
+      ;(this._addedImports || (this._addedImports = new Set())).add(id)
+      if (watcher) ensureWatchedFile(watcher, id, root)
+    }
+
+    // ! 获取监听文件
+    getWatchFiles() {
+      return [...watchFiles]
+    }
+
+    // ! ----------------- 下面就是一些 vite 没有实现的方法，vite 插件如果调用，会警告不支持
+
+    emitFile(assetOrFile: EmittedFile) {
+      warnIncompatibleMethod(`emitFile`, this._activePlugin!.name)
+      return ''
+    }
+
+    setAssetSource() {
+      warnIncompatibleMethod(`setAssetSource`, this._activePlugin!.name)
+    }
+
+    getFileName() {
+      warnIncompatibleMethod(`getFileName`, this._activePlugin!.name)
+      return ''
+    }
+
+    // ! ----------------- vite 没有实现的方法 end
+
+    warn(
+      e: string | RollupLog | (() => string | RollupLog),
+      position?: number | { column: number; line: number },
+    ) {
+      const err = formatError(typeof e === 'function' ? e() : e, position, this)
+      const msg = buildErrorMessage(
+        err,
+        [colors.yellow(`warning: ${err.message}`)],
+        false,
+      )
+      logger.warn(msg, {
+        clear: true,
+        timestamp: true,
+      })
+    }
+
+    error(
+      e: string | RollupError,
+      position?: number | { column: number; line: number },
+    ): never {
+      // error thrown here is caught by the transform middleware and passed on
+      // the the error middleware.
+      throw formatError(e, position, this)
+    }
+
+    debug = noop
+    info = noop
+  }
+
+  // 格式化错误信息
+  function formatError(
+    e: string | RollupError,
+    position: number | { column: number; line: number } | undefined,
+    ctx: Context,
+  ) {
+    const err = (
+      typeof e === 'string' ? new Error(e) : e
+    ) as postcss.CssSyntaxError & RollupError
+    if (err.pluginCode) {
+      return err // The plugin likely called `this.error`
+    }
+    if (err.file && err.name === 'CssSyntaxError') {
+      err.id = normalizePath(err.file)
+    }
+    if (ctx._activePlugin) err.plugin = ctx._activePlugin.name
+    if (ctx._activeId && !err.id) err.id = ctx._activeId
+    if (ctx._activeCode) {
+      err.pluginCode = ctx._activeCode
+
+      // some rollup plugins, e.g. json, sets err.position instead of err.pos
+      const pos = position ?? err.pos ?? (err as any).position
+
+      if (pos != null) {
+        let errLocation
+        try {
+          errLocation = numberToPos(ctx._activeCode, pos)
+        } catch (err2) {
+          logger.error(
+            colors.red(
+              `Error in error handler:\n${err2.stack || err2.message}\n`,
+            ),
+            // print extra newline to separate the two errors
+            { error: err2 },
+          )
+          throw err
+        }
+        err.loc = err.loc || {
+          file: err.id,
+          ...errLocation,
+        }
+        err.frame = err.frame || generateCodeFrame(ctx._activeCode, pos)
+      } else if (err.loc) {
+        // css preprocessors may report errors in an included file
+        if (!err.frame) {
+          let code = ctx._activeCode
+          if (err.loc.file) {
+            err.id = normalizePath(err.loc.file)
+            try {
+              code = fs.readFileSync(err.loc.file, 'utf-8')
+            } catch {}
+          }
+          err.frame = generateCodeFrame(code, err.loc)
+        }
+      } else if ((err as any).line && (err as any).column) {
+        err.loc = {
+          file: err.id,
+          line: (err as any).line,
+          column: (err as any).column,
+        }
+        err.frame = err.frame || generateCodeFrame(err.id!, err.loc)
+      }
+
+      if (
+        ctx instanceof TransformContext &&
+        typeof err.loc?.line === 'number' &&
+        typeof err.loc?.column === 'number'
+      ) {
+        const rawSourceMap = ctx._getCombinedSourcemap()
+        if (rawSourceMap) {
+          const traced = new TraceMap(rawSourceMap as any)
+          const { source, line, column } = originalPositionFor(traced, {
+            line: Number(err.loc.line),
+            column: Number(err.loc.column),
+          })
+          if (source && line != null && column != null) {
+            err.loc = { file: source, line, column }
+          }
+        }
+      }
+    } else if (err.loc) {
+      if (!err.frame) {
+        let code = err.pluginCode
+        if (err.loc.file) {
+          err.id = normalizePath(err.loc.file)
+          if (!code) {
+            try {
+              code = fs.readFileSync(err.loc.file, 'utf-8')
+            } catch {}
+          }
+        }
+        if (code) {
+          err.frame = generateCodeFrame(`${code}`, err.loc)
+        }
+      }
+    }
+
+    if (
+      typeof err.loc?.column !== 'number' &&
+      typeof err.loc?.line !== 'number' &&
+      !err.loc?.file
+    ) {
+      delete err.loc
+    }
+
+    return err
+  }
+
+
+  // ! 扩展插件上下文，专门用于处理 sourcemap，和合并 sourcemap
+  class TransformContext extends Context {
+    filename: string
+    originalCode: string
+    originalSourcemap: SourceMap | null = null
+    sourcemapChain: NonNullable<SourceDescription['map']>[] = []
+    combinedMap: SourceMap | null = null
+
+    constructor(filename: string, code: string, inMap?: SourceMap | string) {
+      super()
+      this.filename = filename
+      this.originalCode = code
+      if (inMap) {
+        if (debugSourcemapCombine) {
+          // @ts-expect-error inject name for debug purpose
+          inMap.name = '$inMap'
+        }
+        this.sourcemapChain.push(inMap)
+      }
+    }
+
+    _getCombinedSourcemap(createIfNull = false) {
+      if (
+        debugSourcemapCombine &&
+        debugSourcemapCombineFilter &&
+        this.filename.includes(debugSourcemapCombineFilter)
+      ) {
+        debugSourcemapCombine('----------', this.filename)
+        debugSourcemapCombine(this.combinedMap)
+        debugSourcemapCombine(this.sourcemapChain)
+        debugSourcemapCombine('----------')
+      }
+
+      let combinedMap = this.combinedMap
+      for (let m of this.sourcemapChain) {
+        if (typeof m === 'string') m = JSON.parse(m)
+        if (!('version' in (m as SourceMap))) {
+          // empty, nullified source map
+          combinedMap = this.combinedMap = null
+          this.sourcemapChain.length = 0
+          break
+        }
+        if (!combinedMap) {
+          combinedMap = m as SourceMap
+        } else {
+          combinedMap = combineSourcemaps(cleanUrl(this.filename), [
+            m as RawSourceMap,
+            combinedMap as RawSourceMap,
+          ]) as SourceMap
+        }
+      }
+      if (!combinedMap) {
+        return createIfNull
+          ? new MagicString(this.originalCode).generateMap({
+              includeContent: true,
+              hires: 'boundary',
+              source: cleanUrl(this.filename),
+            })
+          : null
+      }
+      if (combinedMap !== this.combinedMap) {
+        this.combinedMap = combinedMap
+        this.sourcemapChain.length = 0
+      }
+      return this.combinedMap
+    }
+
+    getCombinedSourcemap() {
+      return this._getCombinedSourcemap(true) as SourceMap
+    }
+  }
+
+  // ......
+
+  // ! 插件容器，实现对 Rollup 插件钩子的调度
+  const container: PluginContainer = {
+
+    // ! options：收集和合并所有插件的 options 钩子返回值
+    options: await (async () => {
+
+    })(),
+
+    getModuleInfo,
+
+    // ! 并行执行所有插件的 buildStart 钩子
+    async buildStart() {
+
+    },
+
+    // ! 按顺序执行插件的 resolveId 钩子，找到第一个非空结果
+    async resolveId(rawId, importer = join(root, 'index.html'), options) {
+
+    },
+
+    // ! 按顺序执行插件的 load 钩子，找到第一个非空结果
+    async load(id, options) {
+ 
+    },
+
+    // ! 按顺序执行所有插件的 transform 钩子，依次处理代码
+    async transform(code, id, options) {
+
+    },
+
+    // ! 关闭容器，执行 buildEnd 和 closeBundle 钩子
+    async close() {
+
+    },
+  }
+
+  // ! 返回插件容器
+  return container
+}
 ```
 
 
 
+**createPluginContainer 函数逻辑：**
+
+- 定义 watchFiles 存储所有通过插件系统添加到文件监听列表中的文件路径
+
+  - 当插件调用 addWatchFile() 方法时，文件路径会被添加到这个集合中
+
+- 定义 minimalContext 提供插件执行时的最小上下文环境，包含了插件可以使用的基本方法和元数据
+
+  - 为插件提供基本的运行环境
+  - 在不需要完整插件容器功能时提供轻量级的上下文，用于某些不需要完整上下文的插件
+
+- 定义 Context 实现 Rollup 插件上下文接口，提供插件执行所需的环境。主要包括：
+
+  >  为什么？因为在插件容器只在开发环境用到，有部分 rollup 方法是不需要的
+
+  - parse：解析代码为 ast
+  - resolve：解析模块路径
+  - load：加载模块
+  - getModuleInfo、getModuleIds：上下文对象与模块依赖图相结合，是为了实现开发时的 HMR
+  - addWatchFile：添加监听文件
+  - emitFile、setAssetSource、getFileName：vite 没有实现，如果 vite 插件调用，抛出警告
+
+- 定义 TransformContext 扩展插件上下文，专门用于处理 sourcemap，和合并 sourcemap
+
+- 定义插件容器 container 对象。主要包含：
+
+  - options：收集和合并所有插件的 options 钩子返回值
+  - buildStart：并行执行所有插件的 buildStart 钩子
+  - resolveId：按顺序执行插件的 resolveId 钩子，找到第一个非空结果
+  - load：按顺序执行插件的 load 钩子，找到第一个非空结果
+  - transform：按顺序执行所有插件的 transform 钩子，依次处理代码
+  - close：执行 buildEnd 和 closeBundle 钩子
+
+- 返回插件容器 container
 
 
-### 请求处理
+
+#### createPluginContainer 总结
+
+createPluginContainer 核心逻辑主要是两个：
+
+- 实现插件钩子内部的 Context 上下文对象
+
+- 实现 plugin container 对 Rollup 插件钩子进行调度
 
 
 
-
-
-### 模块图谱
+### 请求处理与模块依赖图
 
 
 

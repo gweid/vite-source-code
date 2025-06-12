@@ -142,6 +142,7 @@ export interface PluginContainer {
   close(): Promise<void>
 }
 
+// ! rollupContext
 type PluginContext = Omit<
   RollupPluginContext,
   // not documented
@@ -152,11 +153,17 @@ type PluginContext = Omit<
 
 export let parser = acorn.Parser
 
-// ! 创建插件容器，提供 Rollup 兼容的插件执行环境
+/**
+ * ! 创建插件容器，提供 Rollup 兼容的插件执行环境
+ * 
+ * ! 核心逻辑就两个：
+ *   ! - 实现插件钩子内部的 Context 上下文对象
+ *   ! - 实现 plugin container 对 Rollup 插件钩子进行调度
+ */
 export async function createPluginContainer(
-  config: ResolvedConfig,
-  moduleGraph?: ModuleGraph,
-  watcher?: FSWatcher,
+  config: ResolvedConfig, // ! 解释合并后的配置
+  moduleGraph?: ModuleGraph, // ! 模块图谱
+  watcher?: FSWatcher, // ! 文件监听实例
 ): Promise<PluginContainer> {
   const {
     plugins,
@@ -183,8 +190,16 @@ export async function createPluginContainer(
 
   // ---------------------------------------------------------------------------
 
+  // ! 存储所有通过插件系统添加到文件监听列表中的文件路径
+  // ! 当插件调用 addWatchFile() 方法时，文件路径会被添加到这个集合中
   const watchFiles = new Set<string>()
 
+
+  /**
+   * ! 提供插件执行时的最小上下文环境，包含了插件可以使用的基本方法和元数据
+   *    - 为插件提供基本的运行环境
+   *    - 在不需要完整插件容器功能时提供轻量级的上下文，用于某些不需要完整上下文的插件
+   */
   const minimalContext: MinimalPluginContext = {
     meta: {
       rollupVersion,
@@ -197,6 +212,7 @@ export async function createPluginContainer(
     error: noop,
   }
 
+  // 辅助告警函数：当插件使用了不兼容的方法时，显示警告信息
   function warnIncompatibleMethod(method: string, plugin: string) {
     logger.warn(
       colors.cyan(`[plugin:${plugin}] `) +
@@ -235,6 +251,7 @@ export async function createPluginContainer(
 
   // throw when an unsupported ModuleInfo property is accessed,
   // so that incompatible plugins fail in a non-cryptic way.
+  // ! 创建一个代理，用于拦截对模块信息的访问，当访问不支持的属性时抛出错误
   const ModuleInfoProxy: ProxyHandler<ModuleInfo> = {
     get(info: any, key: string) {
       if (key in info) {
@@ -253,6 +270,7 @@ export async function createPluginContainer(
   // same default value of "moduleInfo.meta" as in Rollup
   const EMPTY_OBJECT = Object.freeze({})
 
+  // ! 获取模块信息
   function getModuleInfo(id: string) {
     const module = moduleGraph?.getModuleById(id)
     if (!module) {
@@ -267,6 +285,7 @@ export async function createPluginContainer(
     return module.info
   }
 
+  // ! 更新模块信息
   function updateModuleInfo(id: string, { meta }: { meta?: object | null }) {
     if (meta) {
       const moduleInfo = getModuleInfo(id)
@@ -279,6 +298,10 @@ export async function createPluginContainer(
   // we should create a new context for each async hook pipeline so that the
   // active plugin in that pipeline can be tracked in a concurrency-safe manner.
   // using a class to make creating new contexts more efficient
+  // ! 实现 Rollup 插件上下文接口，提供插件执行所需的环境
+  // ! 可以理解为 rollupContext 的 vite 的实现
+  // ! 为什么？因为在插件容器只在开发环境用到，有部分 rollup 方法是不需要的
+  // ! 生产环境 vite 直接用 rollup
   class Context implements PluginContext {
     meta = minimalContext.meta
     ssr = false
@@ -293,6 +316,7 @@ export async function createPluginContainer(
       this._activePlugin = initialPlugin || null
     }
 
+    // ! 解析代码为 ast
     parse(code: string, opts: any = {}) {
       return parser.parse(code, {
         sourceType: 'module',
@@ -302,6 +326,7 @@ export async function createPluginContainer(
       })
     }
 
+    // ! 解析模块路径
     async resolve(
       id: string,
       importer?: string,
@@ -329,6 +354,7 @@ export async function createPluginContainer(
       return out as ResolvedId | null
     }
 
+    // ! 加载模块
     async load(
       options: {
         id: string
@@ -351,25 +377,32 @@ export async function createPluginContainer(
       return moduleInfo
     }
 
+    // ! 获取模块信息
+    // ! 上下文对象与模块依赖图相结合，是为了实现开发时的 HMR
     getModuleInfo(id: string) {
       return getModuleInfo(id)
     }
 
+    // ! 获取所有模块 id
     getModuleIds() {
       return moduleGraph
         ? moduleGraph.idToModuleMap.keys()
         : Array.prototype[Symbol.iterator]()
     }
 
+    // ! 添加监听文件
     addWatchFile(id: string) {
       watchFiles.add(id)
       ;(this._addedImports || (this._addedImports = new Set())).add(id)
       if (watcher) ensureWatchedFile(watcher, id, root)
     }
 
+    // ! 获取监听文件
     getWatchFiles() {
       return [...watchFiles]
     }
+
+    // ! ----------------- 下面就是一些 vite 没有实现的方法，vite 插件如果调用，会警告不支持
 
     emitFile(assetOrFile: EmittedFile) {
       warnIncompatibleMethod(`emitFile`, this._activePlugin!.name)
@@ -384,6 +417,8 @@ export async function createPluginContainer(
       warnIncompatibleMethod(`getFileName`, this._activePlugin!.name)
       return ''
     }
+
+    // ! ----------------- vite 没有实现的方法 end
 
     warn(
       e: string | RollupLog | (() => string | RollupLog),
@@ -414,6 +449,7 @@ export async function createPluginContainer(
     info = noop
   }
 
+  // 格式化错误信息
   function formatError(
     e: string | RollupError,
     position: number | { column: number; line: number } | undefined,
@@ -521,6 +557,8 @@ export async function createPluginContainer(
     return err
   }
 
+
+  // ! 扩展插件上下文，专门用于处理 sourcemap，和合并 sourcemap
   class TransformContext extends Context {
     filename: string
     originalCode: string
@@ -604,7 +642,11 @@ export async function createPluginContainer(
     return promise.finally(() => processesing.delete(promise))
   }
 
+
+  // ! 插件容器，实现对 Rollup 插件钩子的调度
   const container: PluginContainer = {
+
+    // ! 收集和合并所有插件的 options 钩子返回值
     options: await (async () => {
       let options = rollupOptions
       for (const optionsHook of getSortedPluginHooks('options')) {
@@ -628,6 +670,7 @@ export async function createPluginContainer(
 
     getModuleInfo,
 
+    // ! 并行执行所有插件的 buildStart 钩子
     async buildStart() {
       await handleHookPromise(
         hookParallel(
@@ -638,6 +681,7 @@ export async function createPluginContainer(
       )
     },
 
+    // ! 按顺序执行插件的 resolveId 钩子，找到第一个非空结果
     async resolveId(rawId, importer = join(root, 'index.html'), options) {
       const skip = options?.skip
       const ssr = options?.ssr
@@ -649,6 +693,8 @@ export async function createPluginContainer(
       const resolveStart = debugResolve ? performance.now() : 0
       let id: string | null = null
       const partial: Partial<PartialResolvedId> = {}
+
+      // ! 遍历插件，执行 resolveId 钩子
       for (const plugin of getSortedPlugins('resolveId')) {
         if (closed && !ssr) throwClosedServerError()
         if (!plugin.resolveId) continue
@@ -657,10 +703,14 @@ export async function createPluginContainer(
         ctx._activePlugin = plugin
 
         const pluginResolveStart = debugPluginResolve ? performance.now() : 0
+
+        // ! 获取插件的钩子
         const handler =
           'handler' in plugin.resolveId
             ? plugin.resolveId.handler
             : plugin.resolveId
+        
+        // ! 执行插件的 resolveId 钩子
         const result = await handleHookPromise(
           handler.call(ctx as any, rawId, importer, {
             assertions: options?.assertions ?? {},
@@ -670,6 +720,8 @@ export async function createPluginContainer(
             scan,
           }),
         )
+
+        // ! 处理结果
         if (!result) continue
 
         if (typeof result === 'string') {
@@ -686,6 +738,7 @@ export async function createPluginContainer(
         )
 
         // resolveId() is hookFirst - first non-null result is returned.
+        // ! 返回第一个非空结果
         break
       }
 
@@ -702,6 +755,7 @@ export async function createPluginContainer(
         }
       }
 
+      // ! 返回解析结果
       if (id) {
         partial.id = isExternalUrl(id) ? id : normalizePath(id)
         return partial as PartialResolvedId
@@ -710,6 +764,7 @@ export async function createPluginContainer(
       }
     },
 
+    // ! 按顺序执行插件的 load 钩子，找到第一个非空结果
     async load(id, options) {
       const ssr = options?.ssr
       const ctx = new Context()
@@ -733,11 +788,14 @@ export async function createPluginContainer(
       return null
     },
 
+    // ! 按顺序执行所有插件的 transform 钩子，依次处理代码
     async transform(code, id, options) {
       const inMap = options?.inMap
       const ssr = options?.ssr
       const ctx = new TransformContext(id, code, inMap as SourceMap)
       ctx.ssr = !!ssr
+
+      // ! 遍历所有插件执行 transform 钩子
       for (const plugin of getSortedPlugins('transform')) {
         if (closed && !ssr) throwClosedServerError()
         if (!plugin.transform) continue
@@ -779,12 +837,15 @@ export async function createPluginContainer(
           code = result
         }
       }
+
+      // ! 返回最终转换结果和合并的 sourcemap
       return {
         code,
         map: ctx._getCombinedSourcemap(),
       }
     },
 
+    // ! 执行 buildEnd 和 closeBundle 钩子
     async close() {
       if (closed) return
       closed = true
@@ -803,5 +864,6 @@ export async function createPluginContainer(
     },
   }
 
+  // ! 返回插件容器
   return container
 }
