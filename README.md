@@ -6,7 +6,15 @@
 
 ## 调试 vite
 
-需要将 vite下载下来，开启 sourcemap，并 build 构建出产物 dist，然后替换调试项目的 node_modules/vite/dist。具体参考：https://juejin.cn/book/7070324244772716556/section/7159194044663332872
+如果需要 debug 到 vite 源代码，而不是编译后的代码。需要
+
+- 将 vite下载下来
+- 开启 rollup.config.js 中的 sourcemap，并 build 构建出产物 dist
+- 然后替换调试项目的 node_modules/vite/dist。
+
+
+
+可以参考：https://juejin.cn/book/7070324244772716556/section/7159194044663332872
 
 
 
