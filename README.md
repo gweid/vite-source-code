@@ -2595,11 +2595,712 @@ export function importAnalysisPlugin(config: ResolvedConfig): Plugin {
 
 
 
-### HMR
+### HMR 热更新
+
+Vite 服务端根据模块依赖图收集更新模块，进行 HMR
+
+
+
+#### 服务端收集更新
+
+
+
+##### 监听文件变化
+
+```js
+export async function _createServer() {
+  // ...
+  
+  // ! chokidar 是一个文件监听库，用于监听文件变化
+  const watcher = chokidar.watch(
+    // config file dependencies and env file might be outside of root
+    [root, ...config.configFileDependencies, config.envDir],
+    resolvedWatchOptions,
+  ) as FSWatcher
+
+
+  // ! 触发 HMR 更新
+  const onHMRUpdate = async (file: string, configOnly: boolean) => {
+    if (serverConfig.hmr !== false) {
+      try {
+        // ! handleHMRUpdate 是 HMR 核心函数
+        await handleHMRUpdate(file, server, configOnly)
+      } catch (err) {
+        ws.send({
+          type: 'error',
+          err: prepareError(err),
+        })
+      }
+    }
+  }
+
+  const onFileAddUnlink = async (file: string) => {
+    file = normalizePath(file)
+    await handleFileAddUnlink(file, server)
+    await onHMRUpdate(file, true)
+  }
+
+
+  // ! 监听文件变化
+  watcher.on('change', async (file) => {
+    file = normalizePath(file)
+    // invalidate module graph cache on file change
+    // ! 更新依赖图
+    moduleGraph.onFileChange(file)
+
+    // ! 触发 HMR 更新
+    await onHMRUpdate(file, false)
+  })
+  
+  // ! 监听文件添加
+  watcher.on('add', onFileAddUnlink)
+  // ! 监听文件删除
+  watcher.on('unlink', onFileAddUnlink)
+}
+```
+
+Vite 在服务启动时会通过 `chokidar` 监听文件变化：
+
+- 主要包括：修改文件、新增文件和删除文件
+- 文件变化，触发 HMR。这里面处理 HMR 的核心函数是 handleHMRUpdate
+
+
+
+##### 修改文件
+
+监听文件修改，调用 handleHMRUpdate 进入 HMR 收集更新的阶段
+
+> vite/packages/vite/src/node/server/hmr.ts
+
+```js
+// ! 处理文件变化并协调整个 HMR 更新流程
+export async function handleHMRUpdate(
+  file: string,
+  server: ViteDevServer,
+  configOnly: boolean,
+): Promise<void> {
+  const { ws, config, moduleGraph } = server
+  // ! 获取到变化的文件
+  const shortFile = getShortName(file, config.root)
+  const fileName = path.basename(file)
+
+
+  // !如果变化的文件是配置文件（vite.config.js）、配置文件的依赖或环境变量文件（.env）
+  // ! 则重启整个开发服务器。这是因为这些文件的变化可能会影响整个构建过程的配置
+  const isConfig = file === config.configFile
+  const isConfigDependency = config.configFileDependencies.some(
+    (name) => file === name,
+  )
+  const isEnv =
+    config.inlineConfig.envFile !== false &&
+    (fileName === '.env' || fileName.startsWith('.env.'))
+  if (isConfig || isConfigDependency || isEnv) {
+    // auto restart server
+    debugHmr?.(`[config change] ${colors.dim(shortFile)}`)
+    config.logger.info(
+      colors.green(
+        `${path.relative(process.cwd(), file)} changed, restarting server...`,
+      ),
+      { clear: true, timestamp: true },
+    )
+    try {
+      // ! 配置文件变化，重启整个开发服务器
+      await server.restart()
+    } catch (e) {
+      config.logger.error(colors.red(e))
+    }
+    return
+  }
+
+  if (configOnly) {
+    return
+  }
+
+  debugHmr?.(`[file change] ${colors.dim(shortFile)}`)
+
+  // ...
+
+  // ! 通过模块依赖图找到与变化文件关联的所有模块
+  const mods = moduleGraph.getModulesByFile(file)
+
+  // check if any plugin wants to perform custom HMR handling
+  const timestamp = Date.now()
+
+  // ! 创建一个 HMR 上下文对象，包含文件路径、时间戳、受影响的模块列表以及读取文件内容的函数
+  const hmrContext: HmrContext = {
+    file,
+    timestamp,
+    modules: mods ? [...mods] : [],
+    read: () => readModifiedFile(file),
+    server,
+  }
+
+  // ! 调用所有插件的 handleHotUpdate 钩子
+  // ! 允许插件自定义 HMR 行为
+  // ! 插件可以修改受影响的模块列表，例如添加或移除模块，或者完全接管 HMR 处理
+  for (const hook of config.getSortedPluginHooks('handleHotUpdate')) {
+    const filteredModules = await hook(hmrContext)
+    if (filteredModules) {
+      hmrContext.modules = filteredModules
+    }
+  }
+
+  // ! 如果没有找到受影响的模块
+  // !  - 对于 HTML 文件，执行页面重载
+  // !  - 对于其他文件，记录日志并退出，因为这些文件可能不是 JavaScript 文件或者没有被导入
+  if (!hmrContext.modules.length) {
+    // html file cannot be hot updated
+    if (file.endsWith('.html')) {
+      config.logger.info(colors.green(`page reload `) + colors.dim(shortFile), {
+        clear: true,
+        timestamp: true,
+      })
+      ws.send({
+        type: 'full-reload',
+        path: config.server.middlewareMode
+          ? '*'
+          : '/' + normalizePath(path.relative(config.root, file)),
+      })
+    } else {
+      // loaded but not in the module graph, probably not js
+      debugHmr?.(`[no modules matched] ${colors.dim(shortFile)}`)
+    }
+    return
+  }
+
+  // ! 如果找到了受影响的模块，调用 updateModules 函数处理模块更新
+  updateModules(shortFile, hmrContext.modules, timestamp, server)
+}
+```
+
+- 如果变化的文件是配置文件（vite.config.js）、配置文件的依赖或环境变量文件（.env），则重启整个开发服务器
+- 如果变化的是客户端注入的文件(vite/dist/client/client.mjs)，执行完全重载
+- 通过模块依赖图找到与变化文件关联的所有模块
+- 创建一个 HMR 上下文对象，包含文件路径、时间戳、受影响的模块列表以及读取文件内容的函数
+- 调用所有插件的 handleHotUpdate 钩子，允许插件自定义 HMR 行为
+  - 插件可以修改受影响的模块列表，例如添加或移除模块，或者完全接管 HMR 处理
+- 如果没有找到受影响的模块
+  - 对于 HTML 文件，执行页面重载
+  - 对于其他文件，记录日志并退出，因为这些文件可能不是 JavaScript 文件或者没有被导入
+- 如果找到了受影响的模块，调用 updateModules 函数处理模块更新。
+
+
+
+**updateModules 函数**
+
+```js
+export function updateModules(
+  file: string,
+  modules: ModuleNode[],
+  timestamp: number,
+  { config, ws, moduleGraph }: ViteDevServer,
+  afterInvalidation?: boolean,
+): void {
+  const updates: Update[] = []
+  const invalidatedModules = new Set<ModuleNode>()
+  const traversedModules = new Set<ModuleNode>()
+  let needFullReload = false
+
+  for (const mod of modules) {
+    const boundaries: { boundary: ModuleNode; acceptedVia: ModuleNode }[] = []
+
+    // ! 调用 propagateUpdate 函数沿着模块依赖图传播更新，找到热更新边界
+    const hasDeadEnd = propagateUpdate(mod, traversedModules, boundaries)
+
+    moduleGraph.invalidateModule(
+      mod,
+      invalidatedModules,
+      timestamp,
+      true,
+      boundaries.map((b) => b.boundary),
+    )
+
+    if (needFullReload) {
+      continue
+    }
+
+    // ! propagateUpdate 返回值为 true 表示需要刷新页面，否则局部热更新即可
+    if (hasDeadEnd) {
+      needFullReload = true
+      continue
+    }
+
+    // ! 记录热更新边界信息
+    updates.push(
+      ...boundaries.map(({ boundary, acceptedVia }) => ({
+        type: `${boundary.type}-update` as const,
+        timestamp,
+        path: normalizeHmrUrl(boundary.url),
+        explicitImportRequired:
+          boundary.type === 'js'
+            ? isExplicitImportRequired(acceptedVia.url)
+            : undefined,
+        acceptedPath: normalizeHmrUrl(acceptedVia.url),
+      })),
+    )
+  }
+
+  // ! 如果被打上 full-reload 标识，则让客户端强制刷新页面
+  if (needFullReload) {
+    config.logger.info(colors.green(`page reload `) + colors.dim(file), {
+      clear: !afterInvalidation,
+      timestamp: true,
+    })
+    ws.send({
+      type: 'full-reload',
+    })
+    return
+  }
+
+  if (updates.length === 0) {
+    debugHmr?.(colors.yellow(`no update happened `) + colors.dim(file))
+    return
+  }
+
+  // ! 通知客户端进行热更新
+  ws.send({
+    type: 'update',
+    updates,
+  })
+}
+```
+
+- 遍历模块依赖图，调用 propagateUpdate 函数，找到热更新边界
+
+- propagateUpdate 返回值为 true 表示需要刷新页面，否则局部热更新即可
+
+- 记录热更新边界信息到 updates 中
+
+- 如果 needFullReload = true，表示让客户端强制刷新页面；否则，通知客户端进行热更新
+
+  ```js
+  // ! 通知客户端进行热更新
+  ws.send({
+    type: 'update',
+    updates,
+  })
+  ```
+
+
+
+**propagateUpdate 函数：**
+
+```js
+// ! 热更新边界收集
+function propagateUpdate(
+  node: ModuleNode,
+  traversedModules: Set<ModuleNode>,
+  boundaries: { boundary: ModuleNode; acceptedVia: ModuleNode }[],
+  currentChain: ModuleNode[] = [node],
+): boolean /* hasDeadEnd */ {
+  if (traversedModules.has(node)) {
+    return false
+  }
+  traversedModules.add(node)
+
+  if (node.id && node.isSelfAccepting === undefined) {
+    debugHmr?.(
+      `[propagate update] stop propagation because not analyzed: ${colors.dim(
+        node.id,
+      )}`,
+    )
+    return false
+  }
+
+  // ! 接受自身模块更新
+  if (node.isSelfAccepting) {
+    boundaries.push({ boundary: node, acceptedVia: node })
+
+    for (const importer of node.importers) {
+      if (isCSSRequest(importer.url) && !currentChain.includes(importer)) {
+        propagateUpdate(
+          importer,
+          traversedModules,
+          boundaries,
+          currentChain.concat(importer),
+        )
+      }
+    }
+
+    return false
+  }
+
+
+  // ...
+
+  // ! 遍历引用方
+  for (const importer of node.importers) {
+    const subChain = currentChain.concat(importer)
+
+    // ! 如果某个引用方模块接受了当前模块的更新
+    // ! 那么将这个引用方模块作为热更新的边界
+    if (importer.acceptedHmrDeps.has(node)) {
+      boundaries.push({ boundary: importer, acceptedVia: node })
+      continue
+    }
+
+    // ...
+
+    // ! 出现循环依赖，需要强制刷新页面
+    if (currentChain.includes(importer)) {
+      // circular deps is considered dead end
+      return true
+    }
+
+    // ! 递归向更上层的引用方寻找热更新边界
+    if (propagateUpdate(importer, traversedModules, boundaries, subChain)) {
+      return true
+    }
+  }
+  return false
+}
+```
+
+
+
+##### 新增删除文件
+
+```text
+onFileAddUnlink --> handleFileAddUnlink ---> updateModules
+```
+
+与修改文件差不多，最终都是调用 `updateModules`完成模块热更新边界的查找和更新信息的推送
+
+
+
+#### 客户端派发更新
+
+服务端会监听文件的改动，然后计算出对应的热更新信息，通过 WebSocket 将更新信息传递给客户端。更新信息类似：
+
+```js
+// 热更新
+{
+  type: "update",
+  update: [
+    {
+      // 更新类型，也可能是 `css-update`
+      type: "js-update",
+      // 更新时间戳
+      timestamp: 1650702020986,
+      // 热更模块路径
+      path: "/src/main.ts",
+      // 接受的子模块路径
+      acceptedPath: "/src/render.ts"
+    }
+  ]
+}
+
+
+
+// 或者 full-reload 信号刷新
+{
+  type: "full-reload"
+}
+```
+
+
+
+##### 客户端接收更新
+
+Vite 在开发阶段会默认在 HTML 中注入一段客户端的脚本，即：
+
+![](./imgs/img1.png)
+
+
+
+> vite/packages/vite/src/client/client.ts
+
+```js
+try {
+
+  // ! 创建与 vite 服务端的 websocket 连接
+  socket = setupWebSocket(socketProtocol, socketHost, fallback)
+} catch (error) {
+  console.error(`[vite] failed to connect to websocket (${error}). `)
+}
+
+
+
+function setupWebSocket(
+  protocol: string,
+  hostAndPath: string,
+  onCloseWithoutOpen?: () => void,
+) {
+
+  // ! 创建与 vite 服务端的 websocket 连接
+  const socket = new WebSocket(
+    `${protocol}://${hostAndPath}?token=${wsToken}`,
+    'vite-hmr',
+  )
+  let isOpened = false
+
+
+  // ! 当连接成功打开时：
+  // !  - 设置 isOpened 标志为 true，表示连接已成功建立
+  // !  - 通过 notifyListeners 函数触发 'vite:ws:connect' 事件，通知所有监听器连接已建立
+  socket.addEventListener(
+    'open',
+    () => {
+      isOpened = true
+      notifyListeners('vite:ws:connect', { webSocket: socket })
+    },
+    { once: true },
+  )
+
+  // ! 接收到 vite 服务端消息，调用 handleMessage 处理
+  socket.addEventListener('message', async ({ data }) => {
+    handleMessage(JSON.parse(data))
+  })
+
+
+  // ! 连接关闭处理
+  socket.addEventListener('close', async ({ wasClean }) => {
+    if (wasClean) return
+
+    if (!isOpened && onCloseWithoutOpen) {
+      onCloseWithoutOpen()
+      return
+    }
+
+    notifyListeners('vite:ws:disconnect', { webSocket: socket })
+
+    console.log(`[vite] server connection lost. polling for restart...`)
+    await waitForSuccessfulPing(protocol, hostAndPath)
+    location.reload()
+  })
+
+  // ! 返回创建的 socket
+  return socket
+}
+```
+
+
+
+当接收到 vite 服务端的传来的更新信息，调用 handleMessage 处理
+
+
+
+**handleMessage 函数**
+
+```js
+// ! 处理从服务器通过 WebSocket 接收到的各种类型的消息
+async function handleMessage(payload: HMRPayload) {
+  switch (payload.type) {
+    case 'connected':
+      // ! 心跳检测
+      console.debug(`[vite] connected.`)
+      sendMessageBuffer()
+
+      setInterval(() => {
+        if (socket.readyState === socket.OPEN) {
+          socket.send('{"type":"ping"}')
+        }
+      }, __HMR_TIMEOUT__)
+      break
+    case 'update':
+      // ! 热更新
+      notifyListeners('vite:beforeUpdate', payload)
+
+      if (isFirstUpdate && hasErrorOverlay()) {
+        window.location.reload()
+        return
+      } else {
+        clearErrorOverlay()
+        isFirstUpdate = false
+      }
+      await Promise.all(
+        payload.updates.map(async (update): Promise<void> => {
+          if (update.type === 'js-update') {
+            // ! 调用 queueUpdate(fetchUpdate(update)) 获取并应用更新
+            return queueUpdate(fetchUpdate(update))
+          }
+
+          // ! css 更新
+          // ...
+        }),
+      )
+      notifyListeners('vite:afterUpdate', payload)
+      break
+    case 'full-reload':
+      // ! 刷新页面
+      notifyListeners('vite:beforeFullReload', payload)
+      if (payload.path && payload.path.endsWith('.html')) {
+
+        const pagePath = decodeURI(location.pathname)
+        const payloadPath = base + payload.path.slice(1)
+        if (
+          pagePath === payloadPath ||
+          payload.path === '/index.html' ||
+          (pagePath.endsWith('/') && pagePath + 'index.html' === payloadPath)
+        ) {
+          // ! 实际就是通过 location.reload() 刷新页面
+          pageReload()
+        }
+        return
+      } else {
+        // ! 实际就是通过 location.reload() 刷新页面
+        pageReload()
+      }
+      break
+  }
+}
+```
+
+
+
+handleMessage 函数中，主要是 js 的热更新处理
+
+```js
+queueUpdate(fetchUpdate(update))
+```
+
+
+
+queueUpdate 函数
+
+```js
+let pending = false
+let queued: Promise<(() => void) | undefined>[] = []
+
+
+// ! 批量任务处理，不与具体的热更新行为挂钩，主要起任务调度作用
+async function queueUpdate(p: Promise<(() => void) | undefined>) {
+  // ! 将热更新行为添加进队列
+  queued.push(p)
+  if (!pending) {
+    pending = true
+    await Promise.resolve()
+    pending = false
+    const loading = [...queued]
+    queued = []
+    ;(await Promise.all(loading)).forEach((fn) => fn && fn())
+  }
+}
+```
+
+
+
+fetchUpdate 函数
+
+```js
+```
 
 
 
 
 
-### 预编译
+对热更新的边界模块来讲，需要在客户端获取这些信息:
+
+- 边界模块所接受(accept)的模块
+- accept 的模块触发更新后的回调
+
+
+
+在 `vite:import-analysis` 插件中，会给包含热更新逻辑的模块注入一些工具代码，如下图所示：
+
+![](./imgs/img2.png)
+
+
+
+`createHotContext` 同样是客户端脚本中的一个工具函数：
+
+```js
+export function createHotContext(ownerPath: string): ViteHotContext {
+  // ...
+
+  // ! 将当前模块的接收模块信息和更新回调注册到 hotModulesMap
+  function acceptDeps(deps: string[], callback: HotCallback['fn'] = () => {}) {
+    const mod: HotModule = hotModulesMap.get(ownerPath) || {
+      id: ownerPath,
+      callbacks: [],
+    }
+    mod.callbacks.push({
+      deps,
+      fn: callback,
+    })
+    hotModulesMap.set(ownerPath, mod)
+  }
+
+  const hot: ViteHotContext = {
+    get data() {
+      return dataMap.get(ownerPath)
+    },
+
+    accept(deps?: any, callback?: any) {
+      if (typeof deps === 'function' || !deps) {
+        // self-accept: hot.accept(() => {})
+        acceptDeps([ownerPath], ([mod]) => deps?.(mod))
+      } else if (typeof deps === 'string') {
+        // explicit deps
+        acceptDeps([deps], ([mod]) => callback?.(mod))
+      } else if (Array.isArray(deps)) {
+        acceptDeps(deps, callback)
+      } else {
+        throw new Error(`invalid hot.accept() usage.`)
+      }
+    },
+
+    // export names (first arg) are irrelevant on the client side, they're
+    // extracted in the server for propagation
+    acceptExports(_, callback) {
+      acceptDeps([ownerPath], ([mod]) => callback?.(mod))
+    },
+
+    dispose(cb) {
+      disposeMap.set(ownerPath, cb)
+    },
+
+    prune(cb) {
+      pruneMap.set(ownerPath, cb)
+    },
+
+    // Kept for backward compatibility (#11036)
+    // @ts-expect-error untyped
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    decline() {},
+
+    // tell the server to re-perform hmr propagation from this module as root
+    invalidate(message) {
+      notifyListeners('vite:invalidate', { path: ownerPath, message })
+      this.send('vite:invalidate', { path: ownerPath, message })
+      console.debug(
+        `[vite] invalidate ${ownerPath}${message ? `: ${message}` : ''}`,
+      )
+    },
+
+    // custom events
+    on(event, cb) {
+      const addToMap = (map: Map<string, any[]>) => {
+        const existing = map.get(event) || []
+        existing.push(cb)
+        map.set(event, existing)
+      }
+      addToMap(customListenersMap)
+      addToMap(newListeners)
+    },
+
+    send(event, data) {
+      messageBuffer.push(JSON.stringify({ type: 'custom', event, data }))
+      sendMessageBuffer()
+    },
+  }
+
+  return hot
+}
+```
+
+
+
+因此，Vite 给每个热更新边界模块注入的工具代码主要有两个作用:
+
+- 注入 import.meta.hot 对象的实现
+- 将当前模块 accept 过的模块和更新回调函数记录到 hotModulesMap 表中
+
+
+
+`fetchUpdate` 函数则是通过 `hotModuleMap` 来获取边界模块的相关信息，在 accept 的模块发生变动后，通过动态 import 拉取最新的模块内容，然后返回更新回调，让`queueUpdate`这个调度函数执行更新回调，从而完成**派发更新**的过程
+
+
+
+### 依赖预构建
 

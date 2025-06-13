@@ -580,6 +580,7 @@ export async function _createServer(
   const onHMRUpdate = async (file: string, configOnly: boolean) => {
     if (serverConfig.hmr !== false) {
       try {
+        // ! handleHMRUpdate 是 HMR 核心函数
         await handleHMRUpdate(file, server, configOnly)
       } catch (err) {
         ws.send({

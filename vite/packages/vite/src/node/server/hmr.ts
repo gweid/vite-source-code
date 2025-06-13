@@ -49,15 +49,20 @@ export function getShortName(file: string, root: string): string {
     : file
 }
 
+// ! 处理文件变化并协调整个 HMR 更新流程
 export async function handleHMRUpdate(
   file: string,
   server: ViteDevServer,
   configOnly: boolean,
 ): Promise<void> {
   const { ws, config, moduleGraph } = server
+  // ! 获取到变化的文件
   const shortFile = getShortName(file, config.root)
   const fileName = path.basename(file)
 
+
+  // !如果变化的文件是配置文件（vite.config.js）、配置文件的依赖或环境变量文件（.env）
+  // ! 则重启整个开发服务器。这是因为这些文件的变化可能会影响整个构建过程的配置
   const isConfig = file === config.configFile
   const isConfigDependency = config.configFileDependencies.some(
     (name) => file === name,
@@ -75,6 +80,7 @@ export async function handleHMRUpdate(
       { clear: true, timestamp: true },
     )
     try {
+      // ! 配置文件变化，重启整个开发服务器
       await server.restart()
     } catch (e) {
       config.logger.error(colors.red(e))
@@ -89,6 +95,8 @@ export async function handleHMRUpdate(
   debugHmr?.(`[file change] ${colors.dim(shortFile)}`)
 
   // (dev only) the client itself cannot be hot updated.
+  // ! 对于客户端注入的文件(vite/dist/client/client.mjs)的改动
+  // ! Vite 会给客户端发送 full-reload 信号，让客户端刷新页面
   if (file.startsWith(withTrailingSlash(normalizedClientDir))) {
     ws.send({
       type: 'full-reload',
@@ -97,10 +105,13 @@ export async function handleHMRUpdate(
     return
   }
 
+  // ! 通过模块依赖图找到与变化文件关联的所有模块
   const mods = moduleGraph.getModulesByFile(file)
 
   // check if any plugin wants to perform custom HMR handling
   const timestamp = Date.now()
+
+  // ! 创建一个 HMR 上下文对象，包含文件路径、时间戳、受影响的模块列表以及读取文件内容的函数
   const hmrContext: HmrContext = {
     file,
     timestamp,
@@ -109,6 +120,9 @@ export async function handleHMRUpdate(
     server,
   }
 
+  // ! 调用所有插件的 handleHotUpdate 钩子
+  // ! 允许插件自定义 HMR 行为
+  // ! 插件可以修改受影响的模块列表，例如添加或移除模块，或者完全接管 HMR 处理
   for (const hook of config.getSortedPluginHooks('handleHotUpdate')) {
     const filteredModules = await hook(hmrContext)
     if (filteredModules) {
@@ -116,6 +130,9 @@ export async function handleHMRUpdate(
     }
   }
 
+  // ! 如果没有找到受影响的模块
+  // !  - 对于 HTML 文件，执行页面重载
+  // !  - 对于其他文件，记录日志并退出，因为这些文件可能不是 JavaScript 文件或者没有被导入
   if (!hmrContext.modules.length) {
     // html file cannot be hot updated
     if (file.endsWith('.html')) {
@@ -136,9 +153,12 @@ export async function handleHMRUpdate(
     return
   }
 
+  // ! 如果找到了受影响的模块，调用 updateModules 函数处理模块更新
+  // ! updateModules 作用：查找热更新边界
   updateModules(shortFile, hmrContext.modules, timestamp, server)
 }
 
+// ! 模块热更新边界的查找和更新信息的推送
 export function updateModules(
   file: string,
   modules: ModuleNode[],
@@ -153,6 +173,8 @@ export function updateModules(
 
   for (const mod of modules) {
     const boundaries: { boundary: ModuleNode; acceptedVia: ModuleNode }[] = []
+
+    // ! 调用 propagateUpdate 函数沿着模块依赖图传播更新，找到热更新边界
     const hasDeadEnd = propagateUpdate(mod, traversedModules, boundaries)
 
     moduleGraph.invalidateModule(
@@ -167,11 +189,13 @@ export function updateModules(
       continue
     }
 
+    // ! propagateUpdate 返回值为 true 表示需要刷新页面，否则局部热更新即可
     if (hasDeadEnd) {
       needFullReload = true
       continue
     }
 
+    // ! 记录热更新边界信息
     updates.push(
       ...boundaries.map(({ boundary, acceptedVia }) => ({
         type: `${boundary.type}-update` as const,
@@ -186,6 +210,7 @@ export function updateModules(
     )
   }
 
+  // ! 如果被打上 full-reload 标识，则让客户端强制刷新页面
   if (needFullReload) {
     config.logger.info(colors.green(`page reload `) + colors.dim(file), {
       clear: !afterInvalidation,
@@ -207,6 +232,8 @@ export function updateModules(
       colors.dim([...new Set(updates.map((u) => u.path))].join(', ')),
     { clear: !afterInvalidation, timestamp: true },
   )
+
+  // ! 通知客户端进行热更新
   ws.send({
     type: 'update',
     updates,
@@ -243,6 +270,7 @@ function areAllImportsAccepted(
   return true
 }
 
+// ! 热更新边界收集
 function propagateUpdate(
   node: ModuleNode,
   traversedModules: Set<ModuleNode>,
@@ -266,6 +294,7 @@ function propagateUpdate(
     return false
   }
 
+  // ! 接受自身模块更新
   if (node.isSelfAccepting) {
     boundaries.push({ boundary: node, acceptedVia: node })
 
@@ -308,8 +337,12 @@ function propagateUpdate(
     }
   }
 
+  // ! 遍历引用方
   for (const importer of node.importers) {
     const subChain = currentChain.concat(importer)
+
+    // ! 如果某个引用方模块接受了当前模块的更新
+    // ! 那么将这个引用方模块作为热更新的边界
     if (importer.acceptedHmrDeps.has(node)) {
       boundaries.push({ boundary: importer, acceptedVia: node })
       continue
@@ -325,11 +358,13 @@ function propagateUpdate(
       }
     }
 
+    // ! 出现循环依赖，需要强制刷新页面
     if (currentChain.includes(importer)) {
       // circular deps is considered dead end
       return true
     }
 
+    // ! 递归向更上层的引用方寻找热更新边界
     if (propagateUpdate(importer, traversedModules, boundaries, subChain)) {
       return true
     }

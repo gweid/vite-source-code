@@ -66,6 +66,7 @@ try {
     }
   }
 
+  // ! 创建与 vite 服务端的 websocket 连接
   socket = setupWebSocket(socketProtocol, socketHost, fallback)
 } catch (error) {
   console.error(`[vite] failed to connect to websocket (${error}). `)
@@ -76,12 +77,17 @@ function setupWebSocket(
   hostAndPath: string,
   onCloseWithoutOpen?: () => void,
 ) {
+
+  // ! 创建与 vite 服务端的 websocket 连接
   const socket = new WebSocket(
     `${protocol}://${hostAndPath}?token=${wsToken}`,
     'vite-hmr',
   )
   let isOpened = false
 
+  // ! 当连接成功打开时：
+  // !  - 设置 isOpened 标志为 true，表示连接已成功建立
+  // !  - 通过 notifyListeners 函数触发 'vite:ws:connect' 事件，通知所有监听器连接已建立
   socket.addEventListener(
     'open',
     () => {
@@ -92,11 +98,13 @@ function setupWebSocket(
   )
 
   // Listen for messages
+  // ! 接收到 vite 服务端消息，调用 handleMessage 处理
   socket.addEventListener('message', async ({ data }) => {
     handleMessage(JSON.parse(data))
   })
 
   // ping server
+  // ! 连接关闭处理
   socket.addEventListener('close', async ({ wasClean }) => {
     if (wasClean) return
 
@@ -112,6 +120,7 @@ function setupWebSocket(
     location.reload()
   })
 
+  // ! 返回创建的 socket
   return socket
 }
 
@@ -149,9 +158,11 @@ const debounceReload = (time: number) => {
 }
 const pageReload = debounceReload(50)
 
+// ! 处理从服务器通过 WebSocket 接收到的各种类型的消息
 async function handleMessage(payload: HMRPayload) {
   switch (payload.type) {
     case 'connected':
+      // ! 心跳检测
       console.debug(`[vite] connected.`)
       sendMessageBuffer()
       // proxy(nginx, docker) hmr ws maybe caused timeout,
@@ -163,6 +174,7 @@ async function handleMessage(payload: HMRPayload) {
       }, __HMR_TIMEOUT__)
       break
     case 'update':
+      // ! 热更新
       notifyListeners('vite:beforeUpdate', payload)
       // if this is the first update and there's already an error overlay, it
       // means the page opened with existing server compile error and the whole
@@ -178,9 +190,11 @@ async function handleMessage(payload: HMRPayload) {
       await Promise.all(
         payload.updates.map(async (update): Promise<void> => {
           if (update.type === 'js-update') {
+            // ! 调用 queueUpdate(fetchUpdate(update)) 获取并应用更新
             return queueUpdate(fetchUpdate(update))
           }
 
+          // ! css 更新
           // css-update
           // this is only sent when a css file referenced with <link> is updated
           const { path, timestamp } = update
@@ -230,6 +244,7 @@ async function handleMessage(payload: HMRPayload) {
       break
     }
     case 'full-reload':
+      // ! 刷新页面
       notifyListeners('vite:beforeFullReload', payload)
       if (payload.path && payload.path.endsWith('.html')) {
         // if html file is edited, only reload the page if the browser is
@@ -241,10 +256,12 @@ async function handleMessage(payload: HMRPayload) {
           payload.path === '/index.html' ||
           (pagePath.endsWith('/') && pagePath + 'index.html' === payloadPath)
         ) {
+          // ! 实际就是通过 location.reload() 刷新页面
           pageReload()
         }
         return
       } else {
+        // ! 实际就是通过 location.reload() 刷新页面
         pageReload()
       }
       break
@@ -317,7 +334,9 @@ let queued: Promise<(() => void) | undefined>[] = []
  * so that they are invoked in the same order they were sent.
  * (otherwise the order may be inconsistent because of the http request round trip)
  */
+// ! 批量任务处理，不与具体的热更新行为挂钩，主要起任务调度作用
 async function queueUpdate(p: Promise<(() => void) | undefined>) {
+  // ! 将热更新行为添加进队列
   queued.push(p)
   if (!pending) {
     pending = true
@@ -541,6 +560,7 @@ export function createHotContext(ownerPath: string): ViteHotContext {
   const newListeners: CustomListenersMap = new Map()
   ctxToListenersMap.set(ownerPath, newListeners)
 
+  // ! 将当前模块的接收模块信息和更新回调注册到 hotModulesMap
   function acceptDeps(deps: string[], callback: HotCallback['fn'] = () => {}) {
     const mod: HotModule = hotModulesMap.get(ownerPath) || {
       id: ownerPath,
