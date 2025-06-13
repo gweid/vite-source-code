@@ -2970,6 +2970,11 @@ function propagateUpdate(
 }
 ```
 
+确定更新边界逻辑：
+
+1. **自接受模块优先**：若修改的模块自身调用了 `import.meta.hot.accept()`（无参数），则直接将其作为边界。
+2. **依赖传播**：若模块未自接受，则遍历其 `importers`，递归查找最近的父模块中声明了 `accept` 的节点。
+
 
 
 ##### 新增删除文件
@@ -3011,6 +3016,12 @@ onFileAddUnlink --> handleFileAddUnlink ---> updateModules
   type: "full-reload"
 }
 ```
+
+服务端通过 WebSocket 发送更新消息（如 `{ type: 'update', path: '/src/App.vue' }`），客户端 `@vite/client` 根据边界信息执行以下操作
+
+- **替换模块**：加载新模块代码，替换旧模块（保留状态）
+
+- **CSS 特殊处理**：直接插入新 `<style>` 标签，避免页面闪烁
 
 
 
