@@ -3346,7 +3346,7 @@ optimizeDeps: {
 
 
 
-#### 初始化依赖预构建
+#### 依赖预构建逻辑
 
 在启动 vite 开发服务器的时候，会执行 initDepsOptimizer 初始化依赖预构建
 
