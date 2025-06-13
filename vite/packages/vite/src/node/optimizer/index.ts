@@ -342,6 +342,9 @@ let firstLoadCachedDepOptimizationMetadata = true
  * Creates the initial dep optimization metadata, loading it from the deps cache
  * if it exists and pre-bundling isn't forced
  */
+/**
+ * ! 依赖预构建缓存判断
+ */
 export async function loadCachedDepOptimizationMetadata(
   config: ResolvedConfig,
   ssr: boolean,
@@ -362,12 +365,17 @@ export async function loadCachedDepOptimizationMetadata(
     let cachedMetadata: DepOptimizationMetadata | undefined
     try {
       const cachedMetadataPath = path.join(depsCacheDir, '_metadata.json')
+      // ! 解析缓存中的 _metadata.json 文件
       cachedMetadata = parseDepsOptimizerMetadata(
         await fsp.readFile(cachedMetadataPath, 'utf-8'),
         depsCacheDir,
       )
     } catch (e) {}
+
+
     // hash is consistent, no need to re-bundle
+    // ! 对比 lock 文件 hash 以及配置文件 optimizeDeps 内容
+    // ! 如果一样说明预构建缓存没有任何改变，无需重新预构建，直接使用上次预构建缓存即可
     if (cachedMetadata && cachedMetadata.hash === getDepHash(config, ssr)) {
       log?.('Hash is consistent. Skipping. Use --force to override.')
       // Nothing to commit or cancel as we are using the cache, we only

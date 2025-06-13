@@ -3304,3 +3304,368 @@ export function createHotContext(ownerPath: string): ViteHotContext {
 
 ### 依赖预构建
 
+为什么需要依赖预构建？
+
+- CommonJS 和 UMD 模块兼容性：
+  - NPM 生态中很多库仍然是以 CommonJS (CJS) 或 UMD 格式发布的，这些格式浏览器原生 ESM 并不直接支持。Vite 需要将它们转换为 ESM 才能在浏览器中通过 `import` 使用
+- 性能优化 (减少 HTTP 请求)
+  - 一些大型库可能有非常多的内部模块（例如 `lodash-es` 可能由几百个小 ESM 文件组成）。如果每个小文件都通过单独的 HTTP 请求加载，会导致浏览器请求瀑布流过长，影响页面加载性能，即使是在开发环境
+  - 预构建可以将这些零散的内部模块打包成一个或少数几个 ESM 文件，显著减少 HTTP 请求数量
+
+
+
+vite 默认开启了依赖预构建，默认情况下，`Vite`会抓取项目中的`index.html`来检测需要预构建的依赖
+
+```js
+optimizeDeps: {
+  entries: ['index.html']
+}
+```
+
+如果指定了 `build.rollupOptions.input`，Vite 将转而去抓取这些入口点
+
+
+
+依赖预构建的产物：
+
+![](./imgs/img3.png)
+
+
+
+#### 初始化依赖预构建
+
+在启动 vite 开发服务器的时候，会执行 initDepsOptimizer 初始化依赖预构建
+
+```js
+export async function _createServer(
+  inlineConfig: InlineConfig = {},
+  options: { ws: boolean },
+): Promise<ViteDevServer> {
+  // ...
+  
+
+  const initServer = async () => {
+    // ! 如果服务器已经初始化，则返回
+    if (serverInited) return
+    // 如果服务器正在初始化，则返回正在初始化的 Promise
+    if (initingServer) return initingServer
+
+    initingServer = (async function () {
+      // 执行插件的 buildStart 钩子
+      await container.buildStart({})
+
+      if (isDepsOptimizerEnabled(config, false)) {
+        // ! 依赖预构建：如果启用了依赖预构建，调用 initDepsOptimizer 预编译 node_modules 中的依赖
+        await initDepsOptimizer(config, server)
+      }
+      initingServer = undefined
+      serverInited = true
+    })()
+    return initingServer
+  }
+
+  if (!middlewareMode && httpServer) {
+
+    const listen = httpServer.listen.bind(httpServer)
+    // ! 当浏览器访问开发服务器时，Vite 在响应请求前会调用 httpServer.listen 方法
+    httpServer.listen = (async (port: number, ...args: any[]) => {
+      try {
+        // ensure ws server started
+        // 开启 websocket 服务
+        ws.listen()
+        await initServer()
+      } catch (e) {
+        httpServer.emit('error', e)
+        return
+      }
+      return listen(port, ...args)
+    }) as any
+  } else {
+    if (options.ws) {
+      ws.listen()
+    }
+    await initServer()
+  }
+
+  // ! 将创建的 server 对象返回
+  return server
+}
+```
+
+
+
+initDepsOptimizer 函数
+
+```js
+export async function initDepsOptimizer(
+  config: ResolvedConfig,
+  server?: ViteDevServer,
+): Promise<void> {
+
+  const ssr = config.command === 'build' && !!config.build.ssr
+  if (!getDepsOptimizer(config, ssr)) {
+    await createDepsOptimizer(config, server)
+  }
+}
+```
+
+调用 createDepsOptimizer 开始执行依赖
+
+
+
+**createDepsOptimizer 函数**
+
+核心有两个：
+
+- 先获取本地缓存
+- 没有缓存，启动依赖扫描
+
+```js
+async function createDepsOptimizer(
+  config: ResolvedConfig,
+  server?: ViteDevServer,
+): Promise<void> {
+
+
+  // ! 先获取本地缓存中的metadata数据
+  const cachedMetadata = await loadCachedDepOptimizationMetadata(config, ssr)
+
+
+  // ...
+
+
+  // ! 如果没有依赖预构建的缓存
+  if (!cachedMetadata) {
+
+    if (config.optimizeDeps.noDiscovery) {
+
+      runOptimizer()
+    } else if (!isBuild) {
+
+      depsOptimizer.scanProcessing = new Promise((resolve) => {
+
+        ;(async () => {
+          try {
+
+            // ! 进入依赖扫描
+            discover = discoverProjectDependencies(config)
+
+          } catch (e) {
+
+          } finally {
+
+          }
+        })()
+      })
+    }
+  }
+
+}
+```
+
+
+
+**缓存判断**
+
+loadCachedDepOptimizationMetadata 函数
+
+```js
+export async function loadCachedDepOptimizationMetadata(
+  config: ResolvedConfig,
+  ssr: boolean,
+  force = config.optimizeDeps.force,
+  asCommand = false,
+): Promise<DepOptimizationMetadata | undefined> {
+  const log = asCommand ? config.logger.info : debug
+
+  if (firstLoadCachedDepOptimizationMetadata) {
+    firstLoadCachedDepOptimizationMetadata = false
+    // Fire up a clean up of stale processing deps dirs if older process exited early
+    setTimeout(() => cleanupDepsCacheStaleDirs(config), 0)
+  }
+
+  const depsCacheDir = getDepsCacheDir(config, ssr)
+
+  if (!force) {
+    let cachedMetadata: DepOptimizationMetadata | undefined
+    try {
+      const cachedMetadataPath = path.join(depsCacheDir, '_metadata.json')
+
+      // ! 解析缓存中的 _metadata.json 文件
+      cachedMetadata = parseDepsOptimizerMetadata(
+        await fsp.readFile(cachedMetadataPath, 'utf-8'),
+        depsCacheDir,
+      )
+    } catch (e) {}
+
+    // ! 对比 lock 文件 hash 以及配置文件 optimizeDeps 内容
+    // ! 如果一样说明预构建缓存没有任何改变，无需重新预构建，直接使用上次预构建缓存即可
+    if (cachedMetadata && cachedMetadata.hash === getDepHash(config, ssr)) {
+      log?.('Hash is consistent. Skipping. Use --force to override.')
+      // Nothing to commit or cancel as we are using the cache, we only
+      // need to resolve the processing promise so requests can move on
+      return cachedMetadata
+    }
+  } else {
+    config.logger.info('Forced re-optimization of dependencies')
+  }
+
+  await fsp.rm(depsCacheDir, { recursive: true, force: true })
+}
+```
+
+- 获取到 解析缓存中的 _metadata.json 文件
+  - Vite 在每次预构建之后都将一些关键信息写入到了`_metadata.json`文件中
+- 对比 lock 文件 hash 以及配置文件 optimizeDeps 内容，如果一样说明预构建缓存没有任何改变，无需重新预构建，直接使用上次预构建缓存即可
+
+
+
+**依赖构建**
+
+在 createDepsOptimizer 函数中，如果没有缓存，则需要调用 discoverProjectDependencies 函数进行依赖扫描
+
+```js
+export function discoverProjectDependencies(config: ResolvedConfig): {
+  cancel: () => Promise<void>
+  result: Promise<Record<string, string>>
+} {
+  const { cancel, result } = scanImports(config)
+
+  return {
+    cancel,
+    result: result.then(({ deps, missing }) => {
+      const missingIds = Object.keys(missing)
+      if (missingIds.length) {
+        throw new Error(
+          `The following dependencies are imported but could not be resolved:\n\n  ${missingIds
+            .map(
+              (id) =>
+                `${colors.cyan(id)} ${colors.white(
+                  colors.dim(`(imported by ${missing[id]})`),
+                )}`,
+            )
+            .join(`\n  `)}\n\nAre they installed?`,
+        )
+      }
+
+      return deps
+    }),
+  }
+}
+```
+
+
+
+discoverProjectDependencies 函数核心就是调用了 scanImports，进行依赖扫描，通过扫描项目中的`import`语句来得到需要预编译的依赖
+
+```js
+// ! 预构建依赖扫描、构建
+export function scanImports(config: ResolvedConfig): {
+  cancel: () => Promise<void>
+  result: Promise<{
+    deps: Record<string, string>
+    missing: Record<string, string>
+  }>
+} {
+
+
+  const esbuildContext: Promise<BuildContext | undefined> = computeEntries(
+    config,
+  ).then((computedEntries) => {
+    
+    // ...
+
+    // ! 通过 esbuild，扫描依赖，构建依赖
+    return prepareEsbuildScanner(config, entries, deps, missing, scanContext)
+  })
+
+
+  // 构建结果
+  const result = esbuildContext
+    .then((context) => {
+      function disposeContext() {
+        return context?.dispose().catch((e) => {
+          config.logger.error('Failed to dispose esbuild context', { error: e })
+        })
+      }
+      if (!context || scanContext?.cancelled) {
+        disposeContext()
+        return { deps: {}, missing: {} }
+      }
+      return context
+        .rebuild()
+        .then(() => {
+          return {
+            // Ensure a fixed order so hashes are stable and improve logs
+            deps: orderedDependencies(deps),
+            missing,
+          }
+        })
+        .finally(() => {
+          return disposeContext()
+        })
+    })
+    .catch(async (e) => {
+
+    })
+    .finally(() => {
+
+    })
+
+  return {
+    cancel: async () => {
+      scanContext.cancelled = true
+      return esbuildContext.then((context) => context?.cancel())
+    },
+    result,
+  }
+}
+```
+
+
+
+这里面核心的是 prepareEsbuildScanner 函数
+
+```js
+// ! 通过 esbuild 插件扫描依赖，然后构建依赖
+async function prepareEsbuildScanner(
+  config: ResolvedConfig,
+  entries: string[],
+  deps: Record<string, string>,
+  missing: Record<string, string>,
+  scanContext?: { cancelled: boolean },
+): Promise<BuildContext | undefined> {
+  const container = await createPluginContainer(config)
+
+  // ! 扫描插件，解析各种 import 语句，最终通过它来记录依赖信息
+  const plugin = esbuildScanPlugin(config, container, deps, missing, entries)
+
+  const {
+    plugins = [],
+    tsconfig,
+    tsconfigRaw,
+    ...esbuildOptions
+  } = config.optimizeDeps?.esbuildOptions ?? {}
+
+  // ! 最后使用 esbuild 进行打包并写入产物到磁盘中
+  return await esbuild.context({
+    absWorkingDir: process.cwd(),
+    write: false,
+    stdin: {
+      contents: entries.map((e) => `import ${JSON.stringify(e)}`).join('\n'),
+      loader: 'js',
+    },
+    bundle: true,
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [...plugins, plugin],
+    tsconfig,
+    tsconfigRaw: resolveTsconfigRaw(tsconfig, tsconfigRaw),
+    ...esbuildOptions,
+  })
+}
+```
+
+- 通过 esbuildScanPlugin 插件进行依赖扫描，解析各种 import 语句，最终通过它来记录依赖信息
+- 最后使用 esbuild 进行打包并写入产物到磁盘中
+

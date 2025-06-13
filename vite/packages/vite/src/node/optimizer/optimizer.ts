@@ -97,6 +97,7 @@ async function createDepsOptimizer(
 
   const sessionTimestamp = Date.now().toString()
 
+  // ! 先获取本地缓存中的metadata数据
   const cachedMetadata = await loadCachedDepOptimizationMetadata(config, ssr)
 
   let debounceProcessingHandle: NodeJS.Timeout | undefined
@@ -193,6 +194,7 @@ async function createDepsOptimizer(
     ])
   }
 
+  // ! 如果没有依赖预构建的缓存
   if (!cachedMetadata) {
     // Enter processing state until crawl of static imports ends
     currentlyProcessing = true
@@ -229,6 +231,7 @@ async function createDepsOptimizer(
           try {
             debug?.(colors.green(`scanning for dependencies...`))
 
+            // ! 进入依赖扫描
             discover = discoverProjectDependencies(config)
             const deps = await discover.result
             discover = undefined

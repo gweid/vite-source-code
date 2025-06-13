@@ -55,6 +55,7 @@ const htmlTypesRE = /\.(html|vue|svelte|astro|imba)$/
 export const importsRE =
   /(?<!\/\/.*)(?<=^|;|\*\/)\s*import(?!\s+type)(?:[\w*{}\n\r\t, ]+from)?\s*("[^"]+"|'[^']+')\s*(?=$|;|\/\/|\/\*)/gm
 
+// ! 预构建依赖扫描、构建
 export function scanImports(config: ResolvedConfig): {
   cancel: () => Promise<void>
   result: Promise<{
@@ -95,9 +96,12 @@ export function scanImports(config: ResolvedConfig): {
         .map((entry) => `\n  ${colors.dim(entry)}`)
         .join('')}`,
     )
+
+    // ! 通过 esbuild，扫描依赖，构建依赖
     return prepareEsbuildScanner(config, entries, deps, missing, scanContext)
   })
 
+  // 构建结果
   const result = esbuildContext
     .then((context) => {
       function disposeContext() {
@@ -198,6 +202,7 @@ async function computeEntries(config: ResolvedConfig) {
   return entries
 }
 
+// ! 通过 esbuild 插件扫描依赖，然后构建依赖
 async function prepareEsbuildScanner(
   config: ResolvedConfig,
   entries: string[],
@@ -209,6 +214,7 @@ async function prepareEsbuildScanner(
 
   if (scanContext?.cancelled) return
 
+  // ! 扫描插件，解析各种 import 语句，最终通过它来记录依赖信息
   const plugin = esbuildScanPlugin(config, container, deps, missing, entries)
 
   const {
@@ -218,6 +224,7 @@ async function prepareEsbuildScanner(
     ...esbuildOptions
   } = config.optimizeDeps?.esbuildOptions ?? {}
 
+  // ! 最后使用 esbuild 进行打包并写入产物到磁盘中
   return await esbuild.context({
     absWorkingDir: process.cwd(),
     write: false,
